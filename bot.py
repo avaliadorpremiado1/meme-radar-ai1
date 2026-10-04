@@ -488,6 +488,10 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
+        # ==========================================
+        # 1. DADOS DO MINT
+        # ==========================================
+
         result = solana_rpc(
             "getAccountInfo",
             [
@@ -499,7 +503,7 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         )
 
-        account = result.get("value")
+        account = result.get("value") if result else None
 
         if not account:
 
@@ -526,19 +530,47 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         supply = info.get(
             "supply",
-            "N/D"
+            "0"
         )
 
         decimals = info.get(
             "decimals",
-            "N/D"
+            0
         )
 
         owner_program = account.get(
             "owner",
             "N/D"
         )
-        # Buscar maiores holders do token
+
+        # ==========================================
+        # 2. MINT AUTHORITY
+        # ==========================================
+
+        if mint_authority:
+
+            mint_status = "⚠️ ATIVA"
+
+        else:
+
+            mint_status = "✅ REVOGADA"
+
+        # ==========================================
+        # 3. FREEZE AUTHORITY
+        # ==========================================
+
+        if freeze_authority:
+
+            freeze_status = "⚠️ ATIVA"
+
+        else:
+
+            freeze_status = "✅ REVOGADA"
+
+        # ==========================================
+        # 4. HOLDER INTELLIGENCE
+        # ==========================================
+
         largest_result = solana_rpc(
             "getTokenLargestAccounts",
             [
@@ -549,87 +581,72 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         )
 
-        largest_accounts = (
-            largest_result.get("value", [])
-            if largest_result
-            else []
-        )
+        largest_accounts = []
 
-        # Converter supply para número
+        if largest_result:
+
+            largest_accounts = (
+                largest_result.get("value", [])
+            )
+
+        # ==========================================
+        # 5. CALCULAR CONCENTRAÇÃO
+        # ==========================================
+
         try:
+
             supply_number = int(supply)
+
         except:
+
             supply_number = 0
 
-        top_holder_percentages = []
+        top_10_percentage = 0
 
         if supply_number > 0:
 
-            for holder in largest_accounts:
+            for holder in largest_accounts[:10]:
 
                 amount = int(
-                    holder.get("amount", 0)
+                    holder.get(
+                        "amount",
+                        0
+                    )
                 )
 
                 percentage = (
                     amount / supply_number
                 ) * 100
 
-                top_holder_percentages.append(
-                    percentage
-                )
+                top_10_percentage += percentage
 
-        top_10_percentage = sum(
-            top_holder_percentages[:10]
-        )
+        # ==========================================
+        # 6. CLASSIFICAÇÃO
+        # ==========================================
 
         if top_10_percentage >= 70:
 
-            concentration_status = (
-                "🔴 MUITO ALTA"
-            )
+            concentration_status = "🔴 MUITO ALTA"
 
         elif top_10_percentage >= 50:
 
-            concentration_status = (
-                "🟠 ALTA"
-            )
+            concentration_status = "🟠 ALTA"
 
         elif top_10_percentage >= 30:
 
-            concentration_status = (
-                "🟡 MODERADA"
-            )
+            concentration_status = "🟡 MODERADA"
 
         else:
 
-            concentration_status = (
-                "🟢 BAIXA"
-            )
-        if mint_authority:
+            concentration_status = "🟢 BAIXA"
 
-            mint_status = (
-                "⚠️ ATIVA\n"
-                f"`{mint_authority}`"
-            )
-
-        else:
-
-            mint_status = "✅ REVOGADA"
-
-        if freeze_authority:
-
-            freeze_status = (
-                "⚠️ ATIVA\n"
-                f"`{freeze_authority}`"
-            )
-
-        else:
-
-            freeze_status = "✅ REVOGADA"
+        # ==========================================
+        # 7. MONTAR RESPOSTA
+        # ==========================================
 
         message = (
             "🛡️ SECURITY ENGINE\n\n"
+
             f"🪙 Token:\n"
             f"`{token_address}`\n\n"
 
@@ -647,14 +664,20 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             "⚙️ TOKEN PROGRAM\n"
             f"`{owner_program}`\n\n"
+
             "👥 HOLDER INTELLIGENCE\n"
-            f"Top 10: {top_10_percentage:.2f}%\n"
-            f"Concentração: {concentration_status}\n\n"
+            f"Contas analisadas: "
+            f"{len(largest_accounts)}\n"
+            f"Top 10: "
+            f"{top_10_percentage:.2f}%\n"
+            f"Concentração: "
+            f"{concentration_status}\n\n"
+
             "📊 PRÓXIMA ANÁLISE\n"
-            "• Concentração dos holders\n"
             "• Liquidez\n"
             "• Carteira do dev\n"
             "• Histórico on-chain\n"
+            "• Relação entre carteiras\n"
             "• Risco de rug pull\n\n"
 
             "⚠️ Ainda não é um Security Score."
@@ -669,12 +692,12 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         print(
             "ERRO SECURITY:",
-            error
+            repr(error)
         )
 
         await update.message.reply_text(
-            "❌ Não consegui consultar esse token.\n\n"
-            "Verifique o endereço e tente novamente."
+            "❌ Erro dentro do Security Engine.\n\n"
+            f"Detalhes: {error}"
         )
 async def help_command(
     update: Update,

@@ -179,11 +179,9 @@ def get_token_account_owner(
         {}
     )
 
-    owner = info.get(
+    return info.get(
         "owner"
     )
-
-    return owner
 
 
 # =========================================================
@@ -266,7 +264,7 @@ def get_transaction(
     signature
 ):
 
-    result = solana_rpc(
+    return solana_rpc(
         "getTransaction",
         [
             signature,
@@ -278,7 +276,57 @@ def get_transaction(
         ]
     )
 
-    return result
+
+# =========================================================
+# OBTER ACCOUNT KEYS
+# =========================================================
+
+def get_account_keys(
+    transaction
+):
+
+    if not transaction:
+        return []
+
+    tx = transaction.get(
+        "transaction",
+        {}
+    )
+
+    message = tx.get(
+        "message",
+        {}
+    )
+
+    account_keys = message.get(
+        "accountKeys",
+        []
+    )
+
+    keys = []
+
+    for account in account_keys:
+
+        if isinstance(
+            account,
+            dict
+        ):
+
+            pubkey = account.get(
+                "pubkey"
+            )
+
+            if pubkey:
+                keys.append(pubkey)
+
+        elif isinstance(
+            account,
+            str
+        ):
+
+            keys.append(account)
+
+    return keys
 
 
 # =========================================================
@@ -334,11 +382,147 @@ def get_transaction_signers(
             str
         ):
 
-            # Fallback para resposta não-parsed
             if account not in signers:
                 signers.append(account)
 
     return signers
+
+
+# =========================================================
+# FEE PAYER
+# =========================================================
+
+def get_fee_payer(
+    transaction
+):
+
+    keys = get_account_keys(
+        transaction
+    )
+
+    if not keys:
+        return None
+
+    return keys[0]
+
+
+# =========================================================
+# PROCURAR INICIALIZAÇÃO DO MINT
+# =========================================================
+
+def inspect_mint_initialization(
+    transaction,
+    token_address
+):
+
+    if not transaction:
+        return {
+            "found": False,
+            "mint_authority": None,
+            "freeze_authority": None,
+            "instruction": None
+        }
+
+    tx = transaction.get(
+        "transaction",
+        {}
+    )
+
+    message = tx.get(
+        "message",
+        {}
+    )
+
+    instructions = message.get(
+        "instructions",
+        []
+    )
+
+    # Inclui instruções internas quando disponíveis.
+    meta = transaction.get(
+        "meta",
+        {}
+    )
+
+    inner_groups = meta.get(
+        "innerInstructions",
+        []
+    )
+
+    all_instructions = list(
+        instructions
+    )
+
+    for group in inner_groups:
+
+        for instruction in group.get(
+            "instructions",
+            []
+        ):
+
+            all_instructions.append(
+                instruction
+            )
+
+    valid_types = {
+        "initializeMint",
+        "initializeMint2"
+    }
+
+    for instruction in all_instructions:
+
+        if not isinstance(
+            instruction,
+            dict
+        ):
+            continue
+
+        parsed = instruction.get(
+            "parsed"
+        )
+
+        if not isinstance(
+            parsed,
+            dict
+        ):
+            continue
+
+        instruction_type = parsed.get(
+            "type"
+        )
+
+        if instruction_type not in valid_types:
+            continue
+
+        info = parsed.get(
+            "info",
+            {}
+        )
+
+        mint = info.get(
+            "mint"
+        )
+
+        if mint != token_address:
+            continue
+
+        return {
+            "found": True,
+            "mint_authority": info.get(
+                "mintAuthority"
+            ),
+            "freeze_authority": info.get(
+                "freezeAuthority"
+            ),
+            "instruction": instruction_type
+        }
+
+    return {
+        "found": False,
+        "mint_authority": None,
+        "freeze_authority": None,
+        "instruction": None
+    }
 
 
 # =========================================================
@@ -361,27 +545,21 @@ def identify_deployer(
             "signature": None,
             "block_time": None,
             "signers": [],
+            "fee_payer": None,
+            "mint_initialized": False,
+            "mint_authority": None,
+            "freeze_authority": None,
             "confidence": "BAIXA",
+            "evidence": [],
             "reason": (
                 "Nenhuma transação encontrada "
                 "para o mint."
             )
         }
 
-    # A API retorna do mais recente
-    # para o mais antigo.
-    #
-    # Vamos analisar do mais antigo
-    # para o mais recente.
-
     ordered_signatures = list(
         reversed(signatures)
     )
-
-    first_successful_transaction = None
-    first_signature = None
-    first_block_time = None
-    first_signers = []
 
     for item in ordered_signatures:
 
@@ -420,56 +598,133 @@ def identify_deployer(
         if not signers:
             continue
 
-        first_successful_transaction = (
+        candidate = signers[0]
+
+        fee_payer = get_fee_payer(
             transaction
         )
 
-        first_signature = signature
-
-        first_block_time = (
-            item.get("blockTime")
+        initialization = (
+            inspect_mint_initialization(
+                transaction,
+                token_address
+            )
         )
 
-        first_signers = signers
+        evidence = []
 
-        break
+        if fee_payer == candidate:
 
-    if not first_successful_transaction:
+            evidence.append(
+                "É o fee payer da atividade inicial"
+            )
+
+        if initialization["found"]:
+
+            evidence.append(
+                "Participou da transação que "
+                "inicializou o mint"
+            )
+
+            if (
+                initialization[
+                    "mint_authority"
+                ] == candidate
+            ):
+
+                evidence.append(
+                    "Foi definida como mint authority"
+                )
+
+            if (
+                initialization[
+                    "freeze_authority"
+                ] == candidate
+            ):
+
+                evidence.append(
+                    "Foi definida como freeze authority"
+                )
+
+        confidence_score = 0
+
+        if len(signers) == 1:
+            confidence_score += 20
+
+        if fee_payer == candidate:
+            confidence_score += 25
+
+        if initialization["found"]:
+            confidence_score += 35
+
+        if (
+            initialization[
+                "mint_authority"
+            ] == candidate
+        ):
+            confidence_score += 15
+
+        if (
+            initialization[
+                "freeze_authority"
+            ] == candidate
+        ):
+            confidence_score += 5
+
+        if confidence_score >= 70:
+
+            confidence = "ALTA"
+
+        elif confidence_score >= 40:
+
+            confidence = "MÉDIA"
+
+        else:
+
+            confidence = "BAIXA"
 
         return {
-            "wallet": None,
-            "signature": None,
-            "block_time": None,
-            "signers": [],
-            "confidence": "BAIXA",
+            "wallet": candidate,
+            "signature": signature,
+            "block_time": item.get(
+                "blockTime"
+            ),
+            "signers": signers,
+            "fee_payer": fee_payer,
+            "mint_initialized": (
+                initialization["found"]
+            ),
+            "mint_authority": (
+                initialization["mint_authority"]
+            ),
+            "freeze_authority": (
+                initialization["freeze_authority"]
+            ),
+            "confidence": confidence,
+            "confidence_score": confidence_score,
+            "evidence": evidence,
             "reason": (
-                "Não foi possível identificar "
-                "um signatário da atividade inicial."
+                "Candidato identificado a partir "
+                "da atividade inicial do mint e "
+                "das evidências disponíveis."
             )
         }
 
-    # O primeiro signer da transação é
-    # tratado apenas como CANDIDATO.
-    candidate = first_signers[0]
-
-    if len(first_signers) == 1:
-
-        confidence = "MÉDIA"
-
-    else:
-
-        confidence = "BAIXA"
-
     return {
-        "wallet": candidate,
-        "signature": first_signature,
-        "block_time": first_block_time,
-        "signers": first_signers,
-        "confidence": confidence,
+        "wallet": None,
+        "signature": None,
+        "block_time": None,
+        "signers": [],
+        "fee_payer": None,
+        "mint_initialized": False,
+        "mint_authority": None,
+        "freeze_authority": None,
+        "confidence": "BAIXA",
+        "confidence_score": 0,
+        "evidence": [],
         "reason": (
-            "Wallet identificada a partir do "
-            "signatário da atividade inicial "
-            "encontrada para o mint."
+            "Não foi possível identificar "
+            "um signatário da atividade inicial."
         )
     }
 
@@ -480,7 +735,7 @@ def identify_deployer(
 
 def get_wallet_activity(
     wallet_address,
-    limit=20
+    limit=30
 ):
 
     signatures = solana_rpc(
@@ -495,6 +750,7 @@ def get_wallet_activity(
     )
 
     if not signatures:
+
         return {
             "total": 0,
             "successful": 0,
@@ -527,25 +783,760 @@ def get_wallet_activity(
                 block_time
             )
 
-    first_seen = None
-    last_seen = None
-
-    if timestamps:
-
-        first_seen = min(
-            timestamps
-        )
-
-        last_seen = max(
-            timestamps
-        )
-
     return {
         "total": len(signatures),
         "successful": successful,
         "failed": failed,
-        "first_seen": first_seen,
-        "last_seen": last_seen
+        "first_seen": (
+            min(timestamps)
+            if timestamps
+            else None
+        ),
+        "last_seen": (
+            max(timestamps)
+            if timestamps
+            else None
+        )
+    }
+
+
+# =========================================================
+# TOKEN ACCOUNTS DO DEV
+# =========================================================
+
+def get_wallet_token_accounts(
+    wallet_address,
+    token_address
+):
+
+    result = solana_rpc(
+        "getTokenAccountsByOwner",
+        [
+            wallet_address,
+            {
+                "mint": token_address
+            },
+            {
+                "encoding": "jsonParsed",
+                "commitment": "confirmed"
+            }
+        ]
+    )
+
+    if not result:
+        return []
+
+    return result.get(
+        "value",
+        []
+    )
+
+
+# =========================================================
+# SALDO ATUAL DO DEV
+# =========================================================
+
+def get_wallet_token_balance(
+    wallet_address,
+    token_address,
+    supply
+):
+
+    accounts = get_wallet_token_accounts(
+        wallet_address,
+        token_address
+    )
+
+    total_amount = 0
+    account_count = len(
+        accounts
+    )
+
+    for account in accounts:
+
+        try:
+
+            info = (
+                account
+                .get("account", {})
+                .get("data", {})
+                .get("parsed", {})
+                .get("info", {})
+            )
+
+            token_amount = (
+                info
+                .get("tokenAmount", {})
+                .get("amount", "0")
+            )
+
+            total_amount += int(
+                token_amount
+            )
+
+        except Exception as error:
+
+            print(
+                "ERRO DEV BALANCE:",
+                repr(error)
+            )
+
+    percentage = 0
+
+    try:
+
+        if int(supply) > 0:
+
+            percentage = (
+                total_amount
+                / int(supply)
+            ) * 100
+
+    except Exception:
+
+        percentage = 0
+
+    return {
+        "amount": total_amount,
+        "percentage": percentage,
+        "accounts": account_count
+    }
+
+
+# =========================================================
+# MAPEAR TOKEN BALANCES DE UMA TRANSAÇÃO
+# =========================================================
+
+def get_token_balance_map(
+    transaction,
+    token_address
+):
+
+    if not transaction:
+        return {}
+
+    meta = transaction.get(
+        "meta",
+        {}
+    )
+
+    tx = transaction.get(
+        "transaction",
+        {}
+    )
+
+    message = tx.get(
+        "message",
+        {}
+    )
+
+    account_keys = message.get(
+        "accountKeys",
+        []
+    )
+
+    keys = []
+
+    for account in account_keys:
+
+        if isinstance(
+            account,
+            dict
+        ):
+
+            keys.append(
+                account.get(
+                    "pubkey"
+                )
+            )
+
+        else:
+
+            keys.append(
+                account
+            )
+
+    balances = {}
+
+    pre_balances = (
+        meta.get(
+            "preTokenBalances"
+        )
+        or []
+    )
+
+    post_balances = (
+        meta.get(
+            "postTokenBalances"
+        )
+        or []
+    )
+
+    for item in pre_balances:
+
+        if item.get("mint") != token_address:
+            continue
+
+        index = item.get(
+            "accountIndex"
+        )
+
+        if index is None:
+            continue
+
+        account_address = (
+            keys[index]
+            if index < len(keys)
+            else None
+        )
+
+        if not account_address:
+            continue
+
+        owner = item.get(
+            "owner"
+        )
+
+        amount = int(
+            item
+            .get(
+                "uiTokenAmount",
+                {}
+            )
+            .get(
+                "amount",
+                "0"
+            )
+        )
+
+        balances.setdefault(
+            account_address,
+            {
+                "owner": owner,
+                "pre": 0,
+                "post": 0
+            }
+        )
+
+        balances[
+            account_address
+        ]["pre"] = amount
+
+        if owner:
+            balances[
+                account_address
+            ]["owner"] = owner
+
+    for item in post_balances:
+
+        if item.get("mint") != token_address:
+            continue
+
+        index = item.get(
+            "accountIndex"
+        )
+
+        if index is None:
+            continue
+
+        account_address = (
+            keys[index]
+            if index < len(keys)
+            else None
+        )
+
+        if not account_address:
+            continue
+
+        owner = item.get(
+            "owner"
+        )
+
+        amount = int(
+            item
+            .get(
+                "uiTokenAmount",
+                {}
+            )
+            .get(
+                "amount",
+                "0"
+            )
+        )
+
+        balances.setdefault(
+            account_address,
+            {
+                "owner": owner,
+                "pre": 0,
+                "post": 0
+            }
+        )
+
+        balances[
+            account_address
+        ]["post"] = amount
+
+        if owner:
+            balances[
+                account_address
+            ]["owner"] = owner
+
+    return balances
+
+
+# =========================================================
+# ANALISAR MOVIMENTAÇÃO DO TOKEN PELO DEV
+# =========================================================
+
+def analyze_dev_token_movements(
+    wallet_address,
+    token_address,
+    limit=30
+):
+
+    signatures = solana_rpc(
+        "getSignaturesForAddress",
+        [
+            wallet_address,
+            {
+                "limit": limit,
+                "commitment": "confirmed"
+            }
+        ]
+    )
+
+    if not signatures:
+
+        return {
+            "transactions": 0,
+            "incoming": 0,
+            "outgoing": 0,
+            "counterparties": {},
+            "transfer_signatures": []
+        }
+
+    incoming = 0
+    outgoing = 0
+
+    counterparties = {}
+    transfer_signatures = []
+
+    analyzed = 0
+
+    for item in signatures:
+
+        if item.get("err") is not None:
+            continue
+
+        signature = item.get(
+            "signature"
+        )
+
+        if not signature:
+            continue
+
+        try:
+
+            transaction = get_transaction(
+                signature
+            )
+
+        except Exception as error:
+
+            print(
+                "ERRO DEV TX:",
+                repr(error)
+            )
+
+            continue
+
+        if not transaction:
+            continue
+
+        analyzed += 1
+
+        balances = get_token_balance_map(
+            transaction,
+            token_address
+        )
+
+        if not balances:
+            continue
+
+        changes = []
+
+        for account_address, data in (
+            balances.items()
+        ):
+
+            owner = data.get(
+                "owner"
+            )
+
+            if owner == wallet_address:
+
+                delta = (
+                    data["post"]
+                    - data["pre"]
+                )
+
+                if delta != 0:
+
+                    changes.append(
+                        (
+                            owner,
+                            delta
+                        )
+                    )
+
+        dev_delta = sum(
+            delta
+            for owner, delta in changes
+            if owner == wallet_address
+        )
+
+        if dev_delta == 0:
+            continue
+
+        if dev_delta > 0:
+
+            incoming += dev_delta
+
+        else:
+
+            outgoing += abs(
+                dev_delta
+            )
+
+        for account_address, data in (
+            balances.items()
+        ):
+
+            owner = data.get(
+                "owner"
+            )
+
+            if not owner:
+                continue
+
+            if owner == wallet_address:
+                continue
+
+            delta = (
+                data["post"]
+                - data["pre"]
+            )
+
+            if delta == 0:
+                continue
+
+            # Se o dev recebeu tokens,
+            # outros owners provavelmente enviaram.
+            if dev_delta > 0 and delta < 0:
+
+                counterparties[
+                    owner
+                ] = (
+                    counterparties.get(
+                        owner,
+                        0
+                    )
+                    + abs(delta)
+                )
+
+            # Se o dev enviou tokens,
+            # outros owners provavelmente receberam.
+            elif dev_delta < 0 and delta > 0:
+
+                counterparties[
+                    owner
+                ] = (
+                    counterparties.get(
+                        owner,
+                        0
+                    )
+                    + delta
+                )
+
+        transfer_signatures.append(
+            {
+                "signature": signature,
+                "block_time": transaction.get(
+                    "blockTime"
+                ),
+                "delta": dev_delta
+            }
+        )
+
+    return {
+        "transactions": analyzed,
+        "incoming": incoming,
+        "outgoing": outgoing,
+        "counterparties": counterparties,
+        "transfer_signatures": transfer_signatures
+    }
+
+
+# =========================================================
+# POSSÍVEIS FONTES DE FINANCIAMENTO
+# =========================================================
+
+def analyze_possible_funders(
+    wallet_address,
+    limit=20
+):
+
+    signatures = solana_rpc(
+        "getSignaturesForAddress",
+        [
+            wallet_address,
+            {
+                "limit": limit,
+                "commitment": "confirmed"
+            }
+        ]
+    )
+
+    funders = {}
+
+    if not signatures:
+        return funders
+
+    for item in signatures:
+
+        if item.get("err") is not None:
+            continue
+
+        signature = item.get(
+            "signature"
+        )
+
+        if not signature:
+            continue
+
+        try:
+
+            transaction = get_transaction(
+                signature
+            )
+
+        except Exception:
+
+            continue
+
+        if not transaction:
+            continue
+
+        meta = transaction.get(
+            "meta",
+            {}
+        )
+
+        tx = transaction.get(
+            "transaction",
+            {}
+        )
+
+        message = tx.get(
+            "message",
+            {}
+        )
+
+        account_keys = message.get(
+            "accountKeys",
+            []
+        )
+
+        addresses = []
+
+        for account in account_keys:
+
+            if isinstance(
+                account,
+                dict
+            ):
+
+                addresses.append(
+                    account.get(
+                        "pubkey"
+                    )
+                )
+
+            else:
+
+                addresses.append(
+                    account
+                )
+
+        pre_balances = (
+            meta.get(
+                "preBalances"
+            )
+            or []
+        )
+
+        post_balances = (
+            meta.get(
+                "postBalances"
+            )
+            or []
+        )
+
+        if len(pre_balances) != len(
+            post_balances
+        ):
+            continue
+
+        dev_index = None
+
+        for index, address in enumerate(
+            addresses
+        ):
+
+            if address == wallet_address:
+
+                dev_index = index
+                break
+
+        if dev_index is None:
+            continue
+
+        dev_delta = (
+            post_balances[dev_index]
+            - pre_balances[dev_index]
+        )
+
+        # Só consideramos como possível
+        # financiamento quando a wallet
+        # teve entrada líquida relevante.
+        if dev_delta <= 0:
+            continue
+
+        for index, address in enumerate(
+            addresses
+        ):
+
+            if not address:
+                continue
+
+            if address == wallet_address:
+                continue
+
+            delta = (
+                post_balances[index]
+                - pre_balances[index]
+            )
+
+            if delta >= 0:
+                continue
+
+            # Ignora pequenas diferenças
+            # associadas apenas à taxa.
+            if abs(delta) < 10000:
+                continue
+
+            funders[
+                address
+            ] = (
+                funders.get(
+                    address,
+                    0
+                )
+                + abs(delta)
+            )
+
+    return funders
+
+
+# =========================================================
+# CLASSIFICAR COMPORTAMENTO DO DEV
+# =========================================================
+
+def classify_dev_behavior(
+    dev_data,
+    token_balance,
+    movements,
+    funders
+):
+
+    score = 0
+    reasons = []
+
+    confidence = dev_data.get(
+        "confidence",
+        "BAIXA"
+    )
+
+    if confidence == "ALTA":
+
+        score += 30
+        reasons.append(
+            "forte evidência de participação "
+            "na criação do mint"
+        )
+
+    elif confidence == "MÉDIA":
+
+        score += 15
+
+    if token_balance["percentage"] > 20:
+
+        score += 20
+        reasons.append(
+            "wallet ainda concentra mais de "
+            "20% do supply"
+        )
+
+    elif token_balance["percentage"] > 5:
+
+        score += 10
+        reasons.append(
+            "wallet ainda possui uma parcela "
+            "relevante do supply"
+        )
+
+    if movements["outgoing"] > 0:
+
+        score += 10
+        reasons.append(
+            "foram detectadas saídas do token"
+        )
+
+    if len(
+        movements["counterparties"]
+    ) >= 5:
+
+        score += 10
+        reasons.append(
+            "existem várias wallets relacionadas "
+            "a movimentações do token"
+        )
+
+    if len(funders) >= 2:
+
+        score += 10
+        reasons.append(
+            "foram encontradas possíveis "
+            "fontes de financiamento"
+        )
+
+    if score >= 60:
+
+        status = "🟠 ATENÇÃO"
+
+    elif score >= 35:
+
+        status = "🟡 OBSERVAR"
+
+    else:
+
+        status = "🟢 SEM SINAL FORTE"
+
+    return {
+        "score": min(score, 100),
+        "status": status,
+        "reasons": reasons
     }
 
 
@@ -918,6 +1909,7 @@ async def security(
     await update.message.reply_text(
         "🛡️ SECURITY ENGINE\n\n"
         "🔎 Consultando a blockchain Solana...\n"
+        "🧠 Investigando a wallet candidata...\n"
         "⏳ Aguarde..."
     )
 
@@ -1090,7 +2082,6 @@ async def security(
         top_10_percentage = 0
 
         holder_wallets = {}
-
         liquidity_wallets = {}
 
         if supply_number > 0:
@@ -1294,7 +2285,7 @@ async def security(
             liquidity_status = "🔴 MUITO BAIXA"
 
         # =====================================================
-        # 6. DEV WALLET INTELLIGENCE
+        # 6. DEV WALLET 2.0
         # =====================================================
 
         dev_data = {
@@ -1302,7 +2293,13 @@ async def security(
             "signature": None,
             "block_time": None,
             "signers": [],
+            "fee_payer": None,
+            "mint_initialized": False,
+            "mint_authority": None,
+            "freeze_authority": None,
             "confidence": "BAIXA",
+            "confidence_score": 0,
+            "evidence": [],
             "reason": "Não analisado."
         }
 
@@ -1313,6 +2310,22 @@ async def security(
             "first_seen": None,
             "last_seen": None
         }
+
+        dev_balance = {
+            "amount": 0,
+            "percentage": 0,
+            "accounts": 0
+        }
+
+        dev_movements = {
+            "transactions": 0,
+            "incoming": 0,
+            "outgoing": 0,
+            "counterparties": {},
+            "transfer_signatures": []
+        }
+
+        dev_funders = {}
 
         try:
 
@@ -1329,6 +2342,29 @@ async def security(
                 dev_activity = (
                     get_wallet_activity(
                         dev_wallet,
+                        limit=30
+                    )
+                )
+
+                dev_balance = (
+                    get_wallet_token_balance(
+                        dev_wallet,
+                        token_address,
+                        supply
+                    )
+                )
+
+                dev_movements = (
+                    analyze_dev_token_movements(
+                        dev_wallet,
+                        token_address,
+                        limit=30
+                    )
+                )
+
+                dev_funders = (
+                    analyze_possible_funders(
+                        dev_wallet,
                         limit=20
                     )
                 )
@@ -1336,9 +2372,16 @@ async def security(
         except Exception as dev_error:
 
             print(
-                "ERRO DEV INTELLIGENCE:",
+                "ERRO DEV INTELLIGENCE 2.0:",
                 repr(dev_error)
             )
+
+        dev_behavior = classify_dev_behavior(
+            dev_data,
+            dev_balance,
+            dev_movements,
+            dev_funders
+        )
 
         # =====================================================
         # 7. MENSAGEM DA DEV WALLET
@@ -1363,61 +2406,238 @@ async def security(
                 "BAIXA"
             )
 
+            confidence_score = dev_data.get(
+                "confidence_score",
+                0
+            )
+
             signers = dev_data.get(
                 "signers",
                 []
             )
 
+            fee_payer = dev_data.get(
+                "fee_payer"
+            )
+
+            evidence = dev_data.get(
+                "evidence",
+                []
+            )
+
+            if evidence:
+
+                evidence_message = "\n".join(
+                    f"✅ {item}"
+                    for item in evidence
+                )
+
+            else:
+
+                evidence_message = (
+                    "⚪ Nenhuma evidência adicional "
+                    "forte encontrada."
+                )
+
+            if dev_balance["percentage"] > 0:
+
+                balance_message = (
+                    f"{dev_balance['percentage']:.4f}% "
+                    "do supply"
+                )
+
+            else:
+
+                balance_message = (
+                    "0% do supply atualmente identificado"
+                )
+
+            movement_incoming = (
+                dev_movements["incoming"]
+            )
+
+            movement_outgoing = (
+                dev_movements["outgoing"]
+            )
+
+            if supply_number > 0:
+
+                incoming_percentage = (
+                    movement_incoming
+                    / supply_number
+                ) * 100
+
+                outgoing_percentage = (
+                    movement_outgoing
+                    / supply_number
+                ) * 100
+
+            else:
+
+                incoming_percentage = 0
+                outgoing_percentage = 0
+
+            counterparties = sorted(
+                dev_movements[
+                    "counterparties"
+                ].items(),
+                key=lambda item: item[1],
+                reverse=True
+            )
+
+            counterparties_message = ""
+
+            if counterparties:
+
+                for index, item in enumerate(
+                    counterparties[:5],
+                    start=1
+                ):
+
+                    wallet = item[0]
+                    amount = item[1]
+
+                    if supply_number > 0:
+
+                        percentage = (
+                            amount
+                            / supply_number
+                        ) * 100
+
+                    else:
+
+                        percentage = 0
+
+                    counterparties_message += (
+                        f"{index}. `{wallet}`\n"
+                        f"   {percentage:.4f}% do supply\n"
+                    )
+
+            else:
+
+                counterparties_message = (
+                    "Nenhuma contraparte de token "
+                    "identificada."
+                )
+
+            funders_sorted = sorted(
+                dev_funders.items(),
+                key=lambda item: item[1],
+                reverse=True
+            )
+
+            funders_message = ""
+
+            if funders_sorted:
+
+                for index, item in enumerate(
+                    funders_sorted[:3],
+                    start=1
+                ):
+
+                    wallet = item[0]
+                    lamports = item[1]
+
+                    sol = (
+                        lamports / 1_000_000_000
+                    )
+
+                    funders_message += (
+                        f"{index}. `{wallet}`\n"
+                        f"   ~{sol:.4f} SOL "
+                        "em entradas líquidas observadas\n"
+                    )
+
+            else:
+
+                funders_message = (
+                    "Nenhuma fonte de financiamento "
+                    "clara identificada no histórico "
+                    "consultado."
+                )
+
             dev_message = (
-                "🧠 DEV WALLET INTELLIGENCE\n\n"
+                "🧠 DEV WALLET INTELLIGENCE 2.0\n\n"
 
                 "🟡 CANDIDATO A DEPLOYER\n\n"
 
                 f"Wallet:\n"
                 f"`{dev_wallet}`\n\n"
 
-                f"Confiança da identificação: "
-                f"{dev_confidence}\n\n"
+                f"Confiança: "
+                f"{dev_confidence} "
+                f"({confidence_score}/100)\n\n"
 
-                f"Primeira atividade analisada:\n"
-                f"{format_timestamp(dev_block_time)}\n\n"
+                "🔎 EVIDÊNCIAS\n"
+                f"{evidence_message}\n\n"
 
-                f"Signatários encontrados: "
-                f"{len(signers)}\n\n"
+                "💳 FEE PAYER\n"
+                f"`{fee_payer or 'N/D'}`\n\n"
 
-                f"Transação analisada:\n"
-                f"`{dev_signature}`\n\n"
+                "🪙 INICIALIZAÇÃO DO MINT\n"
+                f"{'✅ DETECTADA' if dev_data.get('mint_initialized') else '⚪ NÃO CONFIRMADA'}\n\n"
 
-                "📜 HISTÓRICO RECENTE\n\n"
-
+                "📜 HISTÓRICO\n"
                 f"Transações analisadas: "
                 f"{dev_activity['total']}\n"
-
                 f"Sucesso: "
                 f"{dev_activity['successful']}\n"
-
                 f"Falhas: "
                 f"{dev_activity['failed']}\n\n"
 
-                f"Primeira atividade no histórico "
-                f"consultado:\n"
+                f"Primeira atividade observada:\n"
                 f"{format_timestamp(dev_activity['first_seen'])}\n\n"
 
-                f"Última atividade:\n"
+                f"Última atividade observada:\n"
                 f"{format_timestamp(dev_activity['last_seen'])}\n\n"
 
-                "⚠️ Essa wallet é um candidato "
-                "a deployer baseado na atividade "
-                "on-chain analisada.\n"
+                "💰 TOKEN ATUALMENTE NA WALLET\n"
+                f"{balance_message}\n"
+                f"Contas do token: "
+                f"{dev_balance['accounts']}\n\n"
 
-                "Isso não prova a identidade do "
-                "desenvolvedor."
+                "🔄 MOVIMENTAÇÃO DO TOKEN\n"
+                f"Entradas observadas: "
+                f"{incoming_percentage:.4f}% do supply\n"
+                f"Saídas observadas: "
+                f"{outgoing_percentage:.4f}% do supply\n\n"
+
+                "👥 PRINCIPAIS CONTRAPARTES\n"
+                f"{counterparties_message}\n"
+
+                "💸 POSSÍVEIS FONTES DE FINANCIAMENTO\n"
+                f"{funders_message}\n"
+
+                "🧭 COMPORTAMENTO\n"
+                f"{dev_behavior['status']}\n"
+                f"Índice interno: "
+                f"{dev_behavior['score']}/100\n\n"
+            )
+
+            if dev_behavior["reasons"]:
+
+                dev_message += (
+                    "Sinais encontrados:\n"
+                    + "\n".join(
+                        f"• {reason}"
+                        for reason in dev_behavior[
+                            "reasons"
+                        ]
+                    )
+                    + "\n\n"
+                )
+
+            dev_message += (
+                "⚠️ Essa wallet continua sendo "
+                "tratada como candidata.\n"
+                "As evidências não provam a identidade "
+                "real do desenvolvedor."
             )
 
         else:
 
             dev_message = (
-                "🧠 DEV WALLET INTELLIGENCE\n\n"
+                "🧠 DEV WALLET INTELLIGENCE 2.0\n\n"
 
                 "⚪ NÃO IDENTIFICADA\n\n"
 
@@ -1502,11 +2722,11 @@ async def security(
 
             "📊 PRÓXIMAS ANÁLISES\n\n"
 
-            "• Histórico detalhado do dev\n"
-            "• Tokens movimentados pelo dev\n"
-            "• Transferências para outras wallets\n"
-            "• Relação entre carteiras\n"
+            "• Histórico on-chain completo\n"
+            "• Relação entre wallets\n"
+            "• Funding em cadeia\n"
             "• Comportamento da liquidez\n"
+            "• Distribuição coordenada\n"
             "• Risco de rug pull\n\n"
 
             "⚠️ Ainda não é um Security Score."

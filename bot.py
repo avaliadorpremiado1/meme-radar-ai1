@@ -1,5 +1,6 @@
 import os
 import requests
+from datetime import datetime, timezone
 
 from telegram import Update
 from telegram.ext import (
@@ -80,7 +81,6 @@ def get_liquidity_data(token_address):
     if not solana_pairs:
         return None
 
-    # Escolher o par com maior liquidez
     best_pair = max(
         solana_pairs,
         key=lambda pair: (
@@ -136,10 +136,12 @@ def get_liquidity_data(token_address):
 
 
 # =========================================================
-# IDENTIFICAR OWNER DE UMA TOKEN ACCOUNT
+# IDENTIFICAR OWNER DE TOKEN ACCOUNT
 # =========================================================
 
-def get_token_account_owner(token_account_address):
+def get_token_account_owner(
+    token_account_address
+):
 
     result = solana_rpc(
         "getAccountInfo",
@@ -206,6 +208,348 @@ def is_liquidity_pool_wallet(
 
 
 # =========================================================
+# FORMATAR DATA
+# =========================================================
+
+def format_timestamp(timestamp):
+
+    if not timestamp:
+        return "N/D"
+
+    try:
+
+        date = datetime.fromtimestamp(
+            timestamp,
+            tz=timezone.utc
+        )
+
+        return date.strftime(
+            "%d/%m/%Y %H:%M UTC"
+        )
+
+    except Exception:
+
+        return "N/D"
+
+
+# =========================================================
+# BUSCAR HISTÓRICO DO MINT
+# =========================================================
+
+def get_mint_signatures(
+    token_address,
+    limit=20
+):
+
+    result = solana_rpc(
+        "getSignaturesForAddress",
+        [
+            token_address,
+            {
+                "limit": limit,
+                "commitment": "confirmed"
+            }
+        ]
+    )
+
+    if not result:
+        return []
+
+    return result
+
+
+# =========================================================
+# BUSCAR TRANSAÇÃO
+# =========================================================
+
+def get_transaction(
+    signature
+):
+
+    result = solana_rpc(
+        "getTransaction",
+        [
+            signature,
+            {
+                "encoding": "jsonParsed",
+                "commitment": "confirmed",
+                "maxSupportedTransactionVersion": 0
+            }
+        ]
+    )
+
+    return result
+
+
+# =========================================================
+# IDENTIFICAR SIGNATÁRIOS
+# =========================================================
+
+def get_transaction_signers(
+    transaction
+):
+
+    if not transaction:
+        return []
+
+    tx = transaction.get(
+        "transaction",
+        {}
+    )
+
+    message = tx.get(
+        "message",
+        {}
+    )
+
+    account_keys = message.get(
+        "accountKeys",
+        []
+    )
+
+    signers = []
+
+    for account in account_keys:
+
+        if isinstance(
+            account,
+            dict
+        ):
+
+            if account.get(
+                "signer"
+            ):
+
+                pubkey = account.get(
+                    "pubkey"
+                )
+
+                if pubkey:
+                    signers.append(
+                        pubkey
+                    )
+
+        elif isinstance(
+            account,
+            str
+        ):
+
+            # Fallback para resposta não-parsed
+            if account not in signers:
+                signers.append(account)
+
+    return signers
+
+
+# =========================================================
+# IDENTIFICAR CANDIDATO A DEPLOYER
+# =========================================================
+
+def identify_deployer(
+    token_address
+):
+
+    signatures = get_mint_signatures(
+        token_address,
+        limit=20
+    )
+
+    if not signatures:
+
+        return {
+            "wallet": None,
+            "signature": None,
+            "block_time": None,
+            "signers": [],
+            "confidence": "BAIXA",
+            "reason": (
+                "Nenhuma transação encontrada "
+                "para o mint."
+            )
+        }
+
+    # A API retorna do mais recente
+    # para o mais antigo.
+    #
+    # Vamos analisar do mais antigo
+    # para o mais recente.
+
+    ordered_signatures = list(
+        reversed(signatures)
+    )
+
+    first_successful_transaction = None
+    first_signature = None
+    first_block_time = None
+    first_signers = []
+
+    for item in ordered_signatures:
+
+        if item.get("err") is not None:
+            continue
+
+        signature = item.get(
+            "signature"
+        )
+
+        if not signature:
+            continue
+
+        try:
+
+            transaction = get_transaction(
+                signature
+            )
+
+        except Exception as error:
+
+            print(
+                "ERRO TRANSACTION:",
+                repr(error)
+            )
+
+            continue
+
+        if not transaction:
+            continue
+
+        signers = get_transaction_signers(
+            transaction
+        )
+
+        if not signers:
+            continue
+
+        first_successful_transaction = (
+            transaction
+        )
+
+        first_signature = signature
+
+        first_block_time = (
+            item.get("blockTime")
+        )
+
+        first_signers = signers
+
+        break
+
+    if not first_successful_transaction:
+
+        return {
+            "wallet": None,
+            "signature": None,
+            "block_time": None,
+            "signers": [],
+            "confidence": "BAIXA",
+            "reason": (
+                "Não foi possível identificar "
+                "um signatário da atividade inicial."
+            )
+        }
+
+    # O primeiro signer da transação é
+    # tratado apenas como CANDIDATO.
+    candidate = first_signers[0]
+
+    if len(first_signers) == 1:
+
+        confidence = "MÉDIA"
+
+    else:
+
+        confidence = "BAIXA"
+
+    return {
+        "wallet": candidate,
+        "signature": first_signature,
+        "block_time": first_block_time,
+        "signers": first_signers,
+        "confidence": confidence,
+        "reason": (
+            "Wallet identificada a partir do "
+            "signatário da atividade inicial "
+            "encontrada para o mint."
+        )
+    }
+
+
+# =========================================================
+# HISTÓRICO RECENTE DA DEV WALLET
+# =========================================================
+
+def get_wallet_activity(
+    wallet_address,
+    limit=20
+):
+
+    signatures = solana_rpc(
+        "getSignaturesForAddress",
+        [
+            wallet_address,
+            {
+                "limit": limit,
+                "commitment": "confirmed"
+            }
+        ]
+    )
+
+    if not signatures:
+        return {
+            "total": 0,
+            "successful": 0,
+            "failed": 0,
+            "first_seen": None,
+            "last_seen": None
+        }
+
+    successful = 0
+    failed = 0
+
+    timestamps = []
+
+    for item in signatures:
+
+        if item.get("err"):
+
+            failed += 1
+
+        else:
+
+            successful += 1
+
+        block_time = item.get(
+            "blockTime"
+        )
+
+        if block_time:
+            timestamps.append(
+                block_time
+            )
+
+    first_seen = None
+    last_seen = None
+
+    if timestamps:
+
+        first_seen = min(
+            timestamps
+        )
+
+        last_seen = max(
+            timestamps
+        )
+
+    return {
+        "total": len(signatures),
+        "successful": successful,
+        "failed": failed,
+        "first_seen": first_seen,
+        "last_seen": last_seen
+    }
+
+
+# =========================================================
 # COMANDO START
 # =========================================================
 
@@ -241,8 +585,8 @@ async def help_command(
         "de mercado.\n\n"
 
         "🛡️ /security ENDERECO\n"
-        "Analisa segurança, autoridades, holders "
-        "e liquidez.\n\n"
+        "Analisa segurança, autoridades, holders, "
+        "liquidez e carteira candidata do deployer.\n\n"
 
         "Exemplo:\n"
         "/security ENDERECO_DO_TOKEN\n\n"
@@ -360,7 +704,6 @@ async def top(
                     "Token"
                 )
 
-                # Ignorar SOL / WSOL
                 if symbol.upper() in [
                     "SOL",
                     "WSOL"
@@ -396,16 +739,11 @@ async def top(
                     or 0
                 )
 
-                # Filtros mínimos
                 if liquidity < 15000:
                     continue
 
                 if volume < 10000:
                     continue
-
-                # =================================================
-                # SCORE DE MERCADO
-                # =================================================
 
                 liquidity_score = min(
                     liquidity / 50000 * 30,
@@ -417,7 +755,6 @@ async def top(
                     30
                 )
 
-                # Evitar premiar demais movimentos parabólicos
                 if price_change >= 50:
 
                     movement_score = 5
@@ -654,10 +991,6 @@ async def security(
             "N/D"
         )
 
-        # =====================================================
-        # 2. MINT AUTHORITY
-        # =====================================================
-
         if mint_authority:
 
             mint_status = "⚠️ ATIVA"
@@ -665,10 +998,6 @@ async def security(
         else:
 
             mint_status = "✅ REVOGADA"
-
-        # =====================================================
-        # 3. FREEZE AUTHORITY
-        # =====================================================
 
         if freeze_authority:
 
@@ -679,32 +1008,7 @@ async def security(
             freeze_status = "✅ REVOGADA"
 
         # =====================================================
-        # 4. HOLDER ACCOUNTS
-        # =====================================================
-
-        largest_result = solana_rpc(
-            "getTokenLargestAccounts",
-            [
-                token_address,
-                {
-                    "commitment": "confirmed"
-                }
-            ]
-        )
-
-        largest_accounts = []
-
-        if largest_result:
-
-            largest_accounts = (
-                largest_result.get(
-                    "value",
-                    []
-                )
-            )
-
-        # =====================================================
-        # 5. DADOS DE LIQUIDEZ
+        # 2. LIQUIDEZ
         # =====================================================
 
         liquidity_data = get_liquidity_data(
@@ -745,7 +1049,32 @@ async def security(
             )
 
         # =====================================================
-        # 6. HOLDER INTELLIGENCE 2.0
+        # 3. MAIORES CONTAS
+        # =====================================================
+
+        largest_result = solana_rpc(
+            "getTokenLargestAccounts",
+            [
+                token_address,
+                {
+                    "commitment": "confirmed"
+                }
+            ]
+        )
+
+        largest_accounts = []
+
+        if largest_result:
+
+            largest_accounts = (
+                largest_result.get(
+                    "value",
+                    []
+                )
+            )
+
+        # =====================================================
+        # 4. HOLDER INTELLIGENCE
         # =====================================================
 
         try:
@@ -758,29 +1087,11 @@ async def security(
 
             supply_number = 0
 
-        # -----------------------------------------------------
-        # CONCENTRAÇÃO BRUTA
-        # -----------------------------------------------------
-
         top_10_percentage = 0
-
-        # -----------------------------------------------------
-        # HOLDERS
-        # -----------------------------------------------------
 
         holder_wallets = {}
 
-        # -----------------------------------------------------
-        # POOLS IDENTIFICADAS
-        # -----------------------------------------------------
-
         liquidity_wallets = {}
-
-        # -----------------------------------------------------
-        # DETALHES
-        # -----------------------------------------------------
-
-        holder_details = []
 
         if supply_number > 0:
 
@@ -801,7 +1112,6 @@ async def security(
                     amount / supply_number
                 ) * 100
 
-                # Concentração bruta
                 top_10_percentage += percentage
 
                 owner = None
@@ -821,113 +1131,53 @@ async def security(
                         repr(owner_error)
                     )
 
-                if owner:
+                if not owner:
+                    continue
 
-                    # =================================================
-                    # VERIFICAR SE É A POOL
-                    # =================================================
+                if is_liquidity_pool_wallet(
+                    owner,
+                    pair_address
+                ):
 
-                    is_pool = (
-                        is_liquidity_pool_wallet(
+                    liquidity_wallets[
+                        owner
+                    ] = (
+                        liquidity_wallets.get(
                             owner,
-                            pair_address
+                            0
                         )
+                        + percentage
                     )
-
-                    # =================================================
-                    # POOL
-                    # =================================================
-
-                    if is_pool:
-
-                        if owner not in liquidity_wallets:
-
-                            liquidity_wallets[owner] = 0
-
-                        liquidity_wallets[owner] += (
-                            percentage
-                        )
-
-                        holder_details.append({
-                            "token_account": (
-                                token_account
-                            ),
-                            "owner": owner,
-                            "percentage": percentage,
-                            "type": "liquidity_pool"
-                        })
-
-                    # =================================================
-                    # HOLDER NORMAL
-                    # =================================================
-
-                    else:
-
-                        if owner not in holder_wallets:
-
-                            holder_wallets[owner] = 0
-
-                        holder_wallets[owner] += (
-                            percentage
-                        )
-
-                        holder_details.append({
-                            "token_account": (
-                                token_account
-                            ),
-                            "owner": owner,
-                            "percentage": percentage,
-                            "type": "holder"
-                        })
 
                 else:
 
-                    holder_details.append({
-                        "token_account": (
-                            token_account
-                        ),
-                        "owner": None,
-                        "percentage": percentage,
-                        "type": "unknown"
-                    })
-
-        # =====================================================
-        # 6.1 CONCENTRAÇÃO DA LIQUIDEZ
-        # =====================================================
+                    holder_wallets[
+                        owner
+                    ] = (
+                        holder_wallets.get(
+                            owner,
+                            0
+                        )
+                        + percentage
+                    )
 
         pool_percentage = sum(
             liquidity_wallets.values()
         )
 
-        # =====================================================
-        # 6.2 CONCENTRAÇÃO REAL
-        # =====================================================
-
         real_holder_percentage = sum(
             holder_wallets.values()
         )
 
-        # =====================================================
-        # 6.3 WALLETS ÚNICAS
-        # =====================================================
-
         unique_wallets = len(
             holder_wallets
         )
-
-        # =====================================================
-        # 6.4 ORDENAR HOLDERS REAIS
-        # =====================================================
 
         sorted_wallets = sorted(
             holder_wallets.items(),
             key=lambda item: item[1],
             reverse=True
         )
-
-        # =====================================================
-        # 6.5 PRINCIPAIS HOLDERS
-        # =====================================================
 
         top_wallets_message = ""
 
@@ -938,14 +1188,10 @@ async def security(
                 start=1
             ):
 
-                wallet_address = wallet[0]
-
-                wallet_percentage = wallet[1]
-
                 top_wallets_message += (
                     f"{index}. "
-                    f"`{wallet_address}`\n"
-                    f"   {wallet_percentage:.2f}%\n"
+                    f"`{wallet[0]}`\n"
+                    f"   {wallet[1]:.2f}%\n"
                 )
 
         else:
@@ -955,26 +1201,20 @@ async def security(
                 "holders reais."
             )
 
-        # =====================================================
-        # 6.6 POOLS IDENTIFICADAS
-        # =====================================================
-
-        pool_message = ""
-
         if liquidity_wallets:
 
             pool_message = (
                 "💧 POOL IDENTIFICADA\n\n"
             )
 
-            for pool_address, pool_percent in (
+            for pool, percentage in (
                 liquidity_wallets.items()
             ):
 
                 pool_message += (
-                    f"Pool: `{pool_address}`\n"
+                    f"Pool: `{pool}`\n"
                     f"Tokens na pool: "
-                    f"{pool_percent:.2f}%\n\n"
+                    f"{percentage:.2f}%\n\n"
                 )
 
         else:
@@ -982,12 +1222,8 @@ async def security(
             pool_message = (
                 "💧 POOL IDENTIFICADA\n\n"
                 "Não foi possível confirmar a pool "
-                "entre as maiores token accounts.\n\n"
+                "entre as maiores contas analisadas.\n\n"
             )
-
-        # =====================================================
-        # 7. CLASSIFICAÇÃO BRUTA
-        # =====================================================
 
         if top_10_percentage >= 70:
 
@@ -1012,10 +1248,6 @@ async def security(
             raw_concentration_status = (
                 "🟢 BAIXA"
             )
-
-        # =====================================================
-        # 8. CLASSIFICAÇÃO REAL
-        # =====================================================
 
         if real_holder_percentage >= 70:
 
@@ -1042,84 +1274,160 @@ async def security(
             )
 
         # =====================================================
-        # 9. CLASSIFICAÇÃO DA LIQUIDEZ
+        # 5. LIQUIDEZ STATUS
         # =====================================================
 
         if liquidity >= 50000:
 
-            liquidity_status = (
-                "🟢 BOA"
-            )
+            liquidity_status = "🟢 BOA"
 
         elif liquidity >= 15000:
 
-            liquidity_status = (
-                "🟡 MODERADA"
-            )
+            liquidity_status = "🟡 MODERADA"
 
         elif liquidity >= 5000:
 
-            liquidity_status = (
-                "🟠 BAIXA"
+            liquidity_status = "🟠 BAIXA"
+
+        else:
+
+            liquidity_status = "🔴 MUITO BAIXA"
+
+        # =====================================================
+        # 6. DEV WALLET INTELLIGENCE
+        # =====================================================
+
+        dev_data = {
+            "wallet": None,
+            "signature": None,
+            "block_time": None,
+            "signers": [],
+            "confidence": "BAIXA",
+            "reason": "Não analisado."
+        }
+
+        dev_activity = {
+            "total": 0,
+            "successful": 0,
+            "failed": 0,
+            "first_seen": None,
+            "last_seen": None
+        }
+
+        try:
+
+            dev_data = identify_deployer(
+                token_address
+            )
+
+            dev_wallet = dev_data.get(
+                "wallet"
+            )
+
+            if dev_wallet:
+
+                dev_activity = (
+                    get_wallet_activity(
+                        dev_wallet,
+                        limit=20
+                    )
+                )
+
+        except Exception as dev_error:
+
+            print(
+                "ERRO DEV INTELLIGENCE:",
+                repr(dev_error)
+            )
+
+        # =====================================================
+        # 7. MENSAGEM DA DEV WALLET
+        # =====================================================
+
+        if dev_data.get("wallet"):
+
+            dev_wallet = dev_data[
+                "wallet"
+            ]
+
+            dev_signature = dev_data.get(
+                "signature"
+            )
+
+            dev_block_time = dev_data.get(
+                "block_time"
+            )
+
+            dev_confidence = dev_data.get(
+                "confidence",
+                "BAIXA"
+            )
+
+            signers = dev_data.get(
+                "signers",
+                []
+            )
+
+            dev_message = (
+                "🧠 DEV WALLET INTELLIGENCE\n\n"
+
+                "🟡 CANDIDATO A DEPLOYER\n\n"
+
+                f"Wallet:\n"
+                f"`{dev_wallet}`\n\n"
+
+                f"Confiança da identificação: "
+                f"{dev_confidence}\n\n"
+
+                f"Primeira atividade analisada:\n"
+                f"{format_timestamp(dev_block_time)}\n\n"
+
+                f"Signatários encontrados: "
+                f"{len(signers)}\n\n"
+
+                f"Transação analisada:\n"
+                f"`{dev_signature}`\n\n"
+
+                "📜 HISTÓRICO RECENTE\n\n"
+
+                f"Transações analisadas: "
+                f"{dev_activity['total']}\n"
+
+                f"Sucesso: "
+                f"{dev_activity['successful']}\n"
+
+                f"Falhas: "
+                f"{dev_activity['failed']}\n\n"
+
+                f"Primeira atividade no histórico "
+                f"consultado:\n"
+                f"{format_timestamp(dev_activity['first_seen'])}\n\n"
+
+                f"Última atividade:\n"
+                f"{format_timestamp(dev_activity['last_seen'])}\n\n"
+
+                "⚠️ Essa wallet é um candidato "
+                "a deployer baseado na atividade "
+                "on-chain analisada.\n"
+
+                "Isso não prova a identidade do "
+                "desenvolvedor."
             )
 
         else:
 
-            liquidity_status = (
-                "🔴 MUITO BAIXA"
+            dev_message = (
+                "🧠 DEV WALLET INTELLIGENCE\n\n"
+
+                "⚪ NÃO IDENTIFICADA\n\n"
+
+                "Não foi possível identificar "
+                "um candidato confiável a deployer "
+                "com os dados RPC consultados."
             )
 
         # =====================================================
-        # 10. MENSAGEM DE LIQUIDEZ
-        # =====================================================
-
-        liquidity_message = (
-            "💧 LIQUIDEZ\n"
-
-            f"Liquidez: "
-            f"${liquidity:,.0f}\n"
-
-            f"Market Cap: "
-            f"${market_cap:,.0f}\n"
-
-            f"Volume 24h: "
-            f"${volume_24h:,.0f}\n"
-
-            f"Variação 24h: "
-            f"{price_change:.2f}%\n\n"
-
-            f"Liquidez: "
-            f"{liquidity_status}\n"
-
-            f"DEX: {dex_id}\n"
-
-            f"Pool: `{pair_address}`"
-        )
-
-        # =====================================================
-        # 11. AVISO DE CONCENTRAÇÃO
-        # =====================================================
-
-        concentration_warning = ""
-
-        if pool_percentage > 0:
-
-            concentration_warning = (
-                "ℹ️ A concentração bruta inclui "
-                "tokens identificados na pool.\n"
-                "A concentração real abaixo exclui "
-                "a pool identificada.\n"
-            )
-
-        else:
-
-            concentration_warning = (
-                "⚠️ Nenhuma pool foi confirmada "
-                "entre as maiores contas analisadas.\n"
-            )
-
-        # =====================================================
-        # 12. MONTAR RESPOSTA
+        # 8. RESPOSTA FINAL
         # =====================================================
 
         message = (
@@ -1163,22 +1471,42 @@ async def security(
             f"Status real: "
             f"{real_concentration_status}\n\n"
 
-            f"{concentration_warning}\n"
-
             f"{pool_message}"
 
             "👛 PRINCIPAIS HOLDERS REAIS\n\n"
 
             f"{top_wallets_message}\n"
 
-            f"{liquidity_message}\n\n"
+            "💧 LIQUIDEZ\n"
+
+            f"Liquidez: "
+            f"${liquidity:,.0f}\n"
+
+            f"Market Cap: "
+            f"${market_cap:,.0f}\n"
+
+            f"Volume 24h: "
+            f"${volume_24h:,.0f}\n"
+
+            f"Variação 24h: "
+            f"{price_change:.2f}%\n\n"
+
+            f"Liquidez: "
+            f"{liquidity_status}\n"
+
+            f"DEX: {dex_id}\n"
+
+            f"Pool: `{pair_address}`\n\n"
+
+            f"{dev_message}\n\n"
 
             "📊 PRÓXIMAS ANÁLISES\n\n"
 
-            "• Carteira do dev\n"
-            "• Histórico on-chain\n"
+            "• Histórico detalhado do dev\n"
+            "• Tokens movimentados pelo dev\n"
+            "• Transferências para outras wallets\n"
             "• Relação entre carteiras\n"
-            "• Liquidez e pool\n"
+            "• Comportamento da liquidez\n"
             "• Risco de rug pull\n\n"
 
             "⚠️ Ainda não é um Security Score."

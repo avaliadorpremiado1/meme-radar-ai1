@@ -185,6 +185,27 @@ def get_token_account_owner(token_account_address):
 
 
 # =========================================================
+# VERIFICAR SE É A POOL
+# =========================================================
+
+def is_liquidity_pool_wallet(
+    wallet_address,
+    pair_address
+):
+
+    if not wallet_address:
+        return False
+
+    if not pair_address:
+        return False
+
+    if pair_address == "N/D":
+        return False
+
+    return wallet_address == pair_address
+
+
+# =========================================================
 # COMANDO START
 # =========================================================
 
@@ -658,7 +679,7 @@ async def security(
             freeze_status = "✅ REVOGADA"
 
         # =====================================================
-        # 4. HOLDER INTELLIGENCE
+        # 4. HOLDER ACCOUNTS
         # =====================================================
 
         largest_result = solana_rpc(
@@ -683,169 +704,19 @@ async def security(
             )
 
         # =====================================================
-        # 5. HOLDER INTELLIGENCE 2.0
-        # =====================================================
-
-        try:
-
-            supply_number = int(
-                supply
-            )
-
-        except Exception:
-
-            supply_number = 0
-
-        top_10_percentage = 0
-
-        holder_wallets = {}
-
-        holder_details = []
-
-        if supply_number > 0:
-
-            for holder in largest_accounts[:10]:
-
-                token_account = holder.get(
-                    "address"
-                )
-
-                amount = int(
-                    holder.get(
-                        "amount",
-                        0
-                    )
-                )
-
-                percentage = (
-                    amount / supply_number
-                ) * 100
-
-                top_10_percentage += percentage
-
-                owner = None
-
-                try:
-
-                    owner = (
-                        get_token_account_owner(
-                            token_account
-                        )
-                    )
-
-                except Exception as owner_error:
-
-                    print(
-                        "ERRO OWNER:",
-                        repr(owner_error)
-                    )
-
-                if owner:
-
-                    if owner not in holder_wallets:
-
-                        holder_wallets[owner] = 0
-
-                    holder_wallets[owner] += (
-                        percentage
-                    )
-
-                    holder_details.append({
-                        "token_account": (
-                            token_account
-                        ),
-                        "owner": owner,
-                        "percentage": percentage
-                    })
-
-                else:
-
-                    holder_details.append({
-                        "token_account": (
-                            token_account
-                        ),
-                        "owner": None,
-                        "percentage": percentage
-                    })
-
-        unique_wallets = len(
-            holder_wallets
-        )
-
-        # =====================================================
-        # 5.1 ORDENAR WALLETS
-        # =====================================================
-
-        sorted_wallets = sorted(
-            holder_wallets.items(),
-            key=lambda item: item[1],
-            reverse=True
-        )
-
-        top_wallets_message = ""
-
-        for index, wallet in enumerate(
-            sorted_wallets[:5],
-            start=1
-        ):
-
-            wallet_address = wallet[0]
-
-            wallet_percentage = wallet[1]
-
-            top_wallets_message += (
-                f"{index}. "
-                f"`{wallet_address}`\n"
-                f"   {wallet_percentage:.2f}%\n"
-            )
-
-        if not top_wallets_message:
-
-            top_wallets_message = (
-                "Não foi possível identificar "
-                "os owners das maiores contas."
-            )
-
-        # =====================================================
-        # 6. CLASSIFICAÇÃO
-        # =====================================================
-
-        if top_10_percentage >= 70:
-
-            concentration_status = (
-                "🔴 MUITO ALTA"
-            )
-
-        elif top_10_percentage >= 50:
-
-            concentration_status = (
-                "🟠 ALTA"
-            )
-
-        elif top_10_percentage >= 30:
-
-            concentration_status = (
-                "🟡 MODERADA"
-            )
-
-        else:
-
-            concentration_status = (
-                "🟢 BAIXA"
-            )
-
-        # =====================================================
-        # 7. LIQUIDEZ
+        # 5. DADOS DE LIQUIDEZ
         # =====================================================
 
         liquidity_data = get_liquidity_data(
             token_address
         )
 
-        liquidity_message = (
-            "💧 LIQUIDEZ\n"
-            "Não foi possível obter dados."
-        )
+        liquidity = 0
+        market_cap = 0
+        volume_24h = 0
+        price_change = 0
+        dex_id = "N/D"
+        pair_address = "N/D"
 
         if liquidity_data:
 
@@ -873,55 +744,382 @@ async def security(
                 liquidity_data["pair_address"]
             )
 
-            if liquidity >= 50000:
+        # =====================================================
+        # 6. HOLDER INTELLIGENCE 2.0
+        # =====================================================
 
-                liquidity_status = (
-                    "🟢 BOA"
+        try:
+
+            supply_number = int(
+                supply
+            )
+
+        except Exception:
+
+            supply_number = 0
+
+        # -----------------------------------------------------
+        # CONCENTRAÇÃO BRUTA
+        # -----------------------------------------------------
+
+        top_10_percentage = 0
+
+        # -----------------------------------------------------
+        # HOLDERS
+        # -----------------------------------------------------
+
+        holder_wallets = {}
+
+        # -----------------------------------------------------
+        # POOLS IDENTIFICADAS
+        # -----------------------------------------------------
+
+        liquidity_wallets = {}
+
+        # -----------------------------------------------------
+        # DETALHES
+        # -----------------------------------------------------
+
+        holder_details = []
+
+        if supply_number > 0:
+
+            for holder in largest_accounts[:10]:
+
+                token_account = holder.get(
+                    "address"
                 )
 
-            elif liquidity >= 15000:
-
-                liquidity_status = (
-                    "🟡 MODERADA"
+                amount = int(
+                    holder.get(
+                        "amount",
+                        0
+                    )
                 )
 
-            elif liquidity >= 5000:
+                percentage = (
+                    amount / supply_number
+                ) * 100
 
-                liquidity_status = (
-                    "🟠 BAIXA"
+                # Concentração bruta
+                top_10_percentage += percentage
+
+                owner = None
+
+                try:
+
+                    owner = (
+                        get_token_account_owner(
+                            token_account
+                        )
+                    )
+
+                except Exception as owner_error:
+
+                    print(
+                        "ERRO OWNER:",
+                        repr(owner_error)
+                    )
+
+                if owner:
+
+                    # =================================================
+                    # VERIFICAR SE É A POOL
+                    # =================================================
+
+                    is_pool = (
+                        is_liquidity_pool_wallet(
+                            owner,
+                            pair_address
+                        )
+                    )
+
+                    # =================================================
+                    # POOL
+                    # =================================================
+
+                    if is_pool:
+
+                        if owner not in liquidity_wallets:
+
+                            liquidity_wallets[owner] = 0
+
+                        liquidity_wallets[owner] += (
+                            percentage
+                        )
+
+                        holder_details.append({
+                            "token_account": (
+                                token_account
+                            ),
+                            "owner": owner,
+                            "percentage": percentage,
+                            "type": "liquidity_pool"
+                        })
+
+                    # =================================================
+                    # HOLDER NORMAL
+                    # =================================================
+
+                    else:
+
+                        if owner not in holder_wallets:
+
+                            holder_wallets[owner] = 0
+
+                        holder_wallets[owner] += (
+                            percentage
+                        )
+
+                        holder_details.append({
+                            "token_account": (
+                                token_account
+                            ),
+                            "owner": owner,
+                            "percentage": percentage,
+                            "type": "holder"
+                        })
+
+                else:
+
+                    holder_details.append({
+                        "token_account": (
+                            token_account
+                        ),
+                        "owner": None,
+                        "percentage": percentage,
+                        "type": "unknown"
+                    })
+
+        # =====================================================
+        # 6.1 CONCENTRAÇÃO DA LIQUIDEZ
+        # =====================================================
+
+        pool_percentage = sum(
+            liquidity_wallets.values()
+        )
+
+        # =====================================================
+        # 6.2 CONCENTRAÇÃO REAL
+        # =====================================================
+
+        real_holder_percentage = sum(
+            holder_wallets.values()
+        )
+
+        # =====================================================
+        # 6.3 WALLETS ÚNICAS
+        # =====================================================
+
+        unique_wallets = len(
+            holder_wallets
+        )
+
+        # =====================================================
+        # 6.4 ORDENAR HOLDERS REAIS
+        # =====================================================
+
+        sorted_wallets = sorted(
+            holder_wallets.items(),
+            key=lambda item: item[1],
+            reverse=True
+        )
+
+        # =====================================================
+        # 6.5 PRINCIPAIS HOLDERS
+        # =====================================================
+
+        top_wallets_message = ""
+
+        if sorted_wallets:
+
+            for index, wallet in enumerate(
+                sorted_wallets[:5],
+                start=1
+            ):
+
+                wallet_address = wallet[0]
+
+                wallet_percentage = wallet[1]
+
+                top_wallets_message += (
+                    f"{index}. "
+                    f"`{wallet_address}`\n"
+                    f"   {wallet_percentage:.2f}%\n"
                 )
 
-            else:
+        else:
 
-                liquidity_status = (
-                    "🔴 MUITO BAIXA"
-                )
-
-            liquidity_message = (
-                "💧 LIQUIDEZ\n"
-
-                f"Liquidez: "
-                f"${liquidity:,.0f}\n"
-
-                f"Market Cap: "
-                f"${market_cap:,.0f}\n"
-
-                f"Volume 24h: "
-                f"${volume_24h:,.0f}\n"
-
-                f"Variação 24h: "
-                f"{price_change:.2f}%\n\n"
-
-                f"Liquidez: "
-                f"{liquidity_status}\n"
-
-                f"DEX: {dex_id}\n"
-
-                f"Pool: `{pair_address}`"
+            top_wallets_message = (
+                "Não foi possível identificar "
+                "holders reais."
             )
 
         # =====================================================
-        # 8. MONTAR RESPOSTA
+        # 6.6 POOLS IDENTIFICADAS
+        # =====================================================
+
+        pool_message = ""
+
+        if liquidity_wallets:
+
+            pool_message = (
+                "💧 POOL IDENTIFICADA\n\n"
+            )
+
+            for pool_address, pool_percent in (
+                liquidity_wallets.items()
+            ):
+
+                pool_message += (
+                    f"Pool: `{pool_address}`\n"
+                    f"Tokens na pool: "
+                    f"{pool_percent:.2f}%\n\n"
+                )
+
+        else:
+
+            pool_message = (
+                "💧 POOL IDENTIFICADA\n\n"
+                "Não foi possível confirmar a pool "
+                "entre as maiores token accounts.\n\n"
+            )
+
+        # =====================================================
+        # 7. CLASSIFICAÇÃO BRUTA
+        # =====================================================
+
+        if top_10_percentage >= 70:
+
+            raw_concentration_status = (
+                "🔴 MUITO ALTA"
+            )
+
+        elif top_10_percentage >= 50:
+
+            raw_concentration_status = (
+                "🟠 ALTA"
+            )
+
+        elif top_10_percentage >= 30:
+
+            raw_concentration_status = (
+                "🟡 MODERADA"
+            )
+
+        else:
+
+            raw_concentration_status = (
+                "🟢 BAIXA"
+            )
+
+        # =====================================================
+        # 8. CLASSIFICAÇÃO REAL
+        # =====================================================
+
+        if real_holder_percentage >= 70:
+
+            real_concentration_status = (
+                "🔴 MUITO ALTA"
+            )
+
+        elif real_holder_percentage >= 50:
+
+            real_concentration_status = (
+                "🟠 ALTA"
+            )
+
+        elif real_holder_percentage >= 30:
+
+            real_concentration_status = (
+                "🟡 MODERADA"
+            )
+
+        else:
+
+            real_concentration_status = (
+                "🟢 BAIXA"
+            )
+
+        # =====================================================
+        # 9. CLASSIFICAÇÃO DA LIQUIDEZ
+        # =====================================================
+
+        if liquidity >= 50000:
+
+            liquidity_status = (
+                "🟢 BOA"
+            )
+
+        elif liquidity >= 15000:
+
+            liquidity_status = (
+                "🟡 MODERADA"
+            )
+
+        elif liquidity >= 5000:
+
+            liquidity_status = (
+                "🟠 BAIXA"
+            )
+
+        else:
+
+            liquidity_status = (
+                "🔴 MUITO BAIXA"
+            )
+
+        # =====================================================
+        # 10. MENSAGEM DE LIQUIDEZ
+        # =====================================================
+
+        liquidity_message = (
+            "💧 LIQUIDEZ\n"
+
+            f"Liquidez: "
+            f"${liquidity:,.0f}\n"
+
+            f"Market Cap: "
+            f"${market_cap:,.0f}\n"
+
+            f"Volume 24h: "
+            f"${volume_24h:,.0f}\n"
+
+            f"Variação 24h: "
+            f"{price_change:.2f}%\n\n"
+
+            f"Liquidez: "
+            f"{liquidity_status}\n"
+
+            f"DEX: {dex_id}\n"
+
+            f"Pool: `{pair_address}`"
+        )
+
+        # =====================================================
+        # 11. AVISO DE CONCENTRAÇÃO
+        # =====================================================
+
+        concentration_warning = ""
+
+        if pool_percentage > 0:
+
+            concentration_warning = (
+                "ℹ️ A concentração bruta inclui "
+                "tokens identificados na pool.\n"
+                "A concentração real abaixo exclui "
+                "a pool identificada.\n"
+            )
+
+        else:
+
+            concentration_warning = (
+                "⚠️ Nenhuma pool foi confirmada "
+                "entre as maiores contas analisadas.\n"
+            )
+
+        # =====================================================
+        # 12. MONTAR RESPOSTA
         # =====================================================
 
         message = (
@@ -945,7 +1143,7 @@ async def security(
             "⚙️ TOKEN PROGRAM\n"
             f"`{owner_program}`\n\n"
 
-            "👥 HOLDER INTELLIGENCE\n"
+            "👥 HOLDER INTELLIGENCE\n\n"
 
             f"Token accounts analisadas: "
             f"{len(largest_accounts)}\n"
@@ -953,19 +1151,29 @@ async def security(
             f"Top 10 bruto: "
             f"{top_10_percentage:.2f}%\n"
 
-            f"Owners identificados: "
+            f"Concentração bruta: "
+            f"{raw_concentration_status}\n\n"
+
+            f"Owners reais identificados: "
             f"{unique_wallets}\n"
 
-            f"Concentração: "
-            f"{concentration_status}\n\n"
+            f"Concentração real: "
+            f"{real_holder_percentage:.2f}%\n"
 
-            "👛 PRINCIPAIS WALLETS IDENTIFICADAS\n"
+            f"Status real: "
+            f"{real_concentration_status}\n\n"
+
+            f"{concentration_warning}\n"
+
+            f"{pool_message}"
+
+            "👛 PRINCIPAIS HOLDERS REAIS\n\n"
 
             f"{top_wallets_message}\n"
 
             f"{liquidity_message}\n\n"
 
-            "📊 PRÓXIMAS ANÁLISES\n"
+            "📊 PRÓXIMAS ANÁLISES\n\n"
 
             "• Carteira do dev\n"
             "• Histórico on-chain\n"

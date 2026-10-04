@@ -538,7 +538,74 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "owner",
             "N/D"
         )
+        # Buscar maiores holders do token
+        largest_result = solana_rpc(
+            "getTokenLargestAccounts",
+            [
+                token_address,
+                {
+                    "commitment": "confirmed"
+                }
+            ]
+        )
 
+        largest_accounts = (
+            largest_result.get("value", [])
+            if largest_result
+            else []
+        )
+
+        # Converter supply para número
+        try:
+            supply_number = int(supply)
+        except:
+            supply_number = 0
+
+        top_holder_percentages = []
+
+        if supply_number > 0:
+
+            for holder in largest_accounts:
+
+                amount = int(
+                    holder.get("amount", 0)
+                )
+
+                percentage = (
+                    amount / supply_number
+                ) * 100
+
+                top_holder_percentages.append(
+                    percentage
+                )
+
+        top_10_percentage = sum(
+            top_holder_percentages[:10]
+        )
+
+        if top_10_percentage >= 70:
+
+            concentration_status = (
+                "🔴 MUITO ALTA"
+            )
+
+        elif top_10_percentage >= 50:
+
+            concentration_status = (
+                "🟠 ALTA"
+            )
+
+        elif top_10_percentage >= 30:
+
+            concentration_status = (
+                "🟡 MODERADA"
+            )
+
+        else:
+
+            concentration_status = (
+                "🟢 BAIXA"
+            )
         if mint_authority:
 
             mint_status = (
@@ -580,7 +647,9 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             "⚙️ TOKEN PROGRAM\n"
             f"`{owner_program}`\n\n"
-
+            "👥 HOLDER INTELLIGENCE\n"
+            f"Top 10: {top_10_percentage:.2f}%\n"
+            f"Concentração: {concentration_status}\n\n"
             "📊 PRÓXIMA ANÁLISE\n"
             "• Concentração dos holders\n"
             "• Liquidez\n"

@@ -111,8 +111,8 @@ def get_liquidity_data(token_address):
         "pair_address": pair_address
     }
     def get_token_accounts_owned_by(owner_address, token_address):
-    result = solana_rpc(
-        "getTokenAccountsByOwner",
+        result = solana_rpc(
+            "getTokenAccountsByOwner",
         [
             owner_address,
             {
@@ -123,7 +123,7 @@ def get_liquidity_data(token_address):
         ]
     )
 
-    if not result:
+        if not result:
         return []
 
     accounts = result.get("value", [])

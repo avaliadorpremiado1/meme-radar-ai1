@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
-SOLANA_RPC = "https://api.mainnet-beta.solana.com"
+SOLANA_RPC = os.environ["SOLANA_RPC"]
 
 
 def solana_rpc(method, params):

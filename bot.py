@@ -2,15 +2,26 @@ import os
 import requests
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes
+)
 
+
+# =========================================================
+# CONFIGURAÇÕES
+# =========================================================
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 SOLANA_RPC = os.environ["SOLANA_RPC"]
 
 
-def solana_rpc(method, params):
+# =========================================================
+# SOLANA RPC
+# =========================================================
 
+def solana_rpc(method, params):
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -32,85 +43,100 @@ def solana_rpc(method, params):
         raise Exception(data["error"])
 
     return data.get("result")
-def get_liquidity_data(token_address):
-    url = f"https://api.dexscreener.com/token-pairs/v1/solana/{token_address}"
 
-    response = requests.get(url, timeout=15)
+
+# =========================================================
+# DADOS DE LIQUIDEZ / DEXSCREENER
+# =========================================================
+
+def get_liquidity_data(token_address):
+
+    url = (
+        "https://api.dexscreener.com/latest/dex/tokens/"
+        f"{token_address}"
+    )
+
+    response = requests.get(
+        url,
+        timeout=20
+    )
+
     response.raise_for_status()
 
     data = response.json()
 
-    if not data:
+    pairs = data.get("pairs", [])
+
+    solana_pairs = [
+        pair
+        for pair in pairs
+        if pair.get("chainId") == "solana"
+    ]
+
+    if not solana_pairs:
         return None
 
-    if isinstance(data, list):
-        pairs = data
-    else:
-        pairs = data.get("pairs", [])
-
-    if not pairs:
-        return None
-
-    valid_pairs = []
-
-    for pair in pairs:
-        liquidity = pair.get("liquidity", {}).get("usd")
-
-        if liquidity is not None:
-            valid_pairs.append(pair)
-
-    if not valid_pairs:
-        return None
-
+    # Escolhe o par com maior liquidez
     best_pair = max(
-        valid_pairs,
-        key=lambda pair: float(
-            pair.get("liquidity", {}).get("usd", 0) or 0
+        solana_pairs,
+        key=lambda pair: (
+            pair.get("liquidity", {}).get("usd") or 0
         )
     )
 
-    liquidity = float(
-        best_pair.get("liquidity", {}).get("usd", 0) or 0
+    liquidity = (
+        best_pair
+        .get("liquidity", {})
+        .get("usd") or 0
     )
 
-    market_cap = float(
+    market_cap = (
         best_pair.get("marketCap")
         or best_pair.get("fdv")
         or 0
     )
 
-    volume_24h = float(
-        best_pair.get("volume", {}).get("h24", 0) or 0
+    volume_24h = (
+        best_pair
+        .get("volume", {})
+        .get("h24") or 0
     )
 
-    price_change_24h = float(
-        best_pair.get("priceChange", {}).get("h24", 0) or 0
+    price_change_24h = (
+        best_pair
+        .get("priceChange", {})
+        .get("h24") or 0
     )
 
-    dex = best_pair.get("dexId", "N/A")
+    dex_id = best_pair.get(
+        "dexId",
+        "N/D"
+    )
 
     pair_address = best_pair.get(
         "pairAddress",
-        "N/A"
+        "N/D"
     )
 
-    if market_cap > 0:
-        liquidity_ratio = (
-            liquidity / market_cap
-        ) * 100
-    else:
-        liquidity_ratio = 0
-
     return {
-        "liquidity": liquidity,
-        "market_cap": market_cap,
-        "volume_24h": volume_24h,
-        "price_change_24h": price_change_24h,
-        "liquidity_ratio": liquidity_ratio,
-        "dex": dex,
+        "liquidity": float(liquidity),
+        "market_cap": float(market_cap),
+        "volume_24h": float(volume_24h),
+        "price_change_24h": float(price_change_24h),
+        "dex_id": dex_id,
         "pair_address": pair_address
     }
-    def get_token_accounts_owned_by(owner_address, token_address):
+
+
+# =========================================================
+# TOKEN ACCOUNTS DE UMA CARTEIRA
+# =========================================================
+
+def get_token_accounts_owned_by(
+    owner_address,
+    token_address
+):
+
     result = solana_rpc(
         "getTokenAccountsByOwner",
         [
@@ -126,139 +152,166 @@ def get_liquidity_data(token_address):
     if not result:
         return []
 
-    accounts = result.get("value", [])
+    accounts = result.get(
+        "value",
+        []
+    )
 
     return [
         account.get("pubkey")
         for account in accounts
         if account.get("pubkey")
     ]
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+
+# =========================================================
+# COMANDO START
+# =========================================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     await update.message.reply_text(
-        "🚀 MEME RADAR AI\n\n"
-        "Seu radar inteligente de memecoins.\n\n"
-        "Comandos:\n"
-        "/top — Melhores oportunidades\n"
-        "/analyze — Analisar um token\n"
-        "/status — Status do sistema\n"
-        "/help — Ajuda"
+        "🤖 MEME RADAR AI\n\n"
+        "Bot online e conectado à Solana.\n\n"
+        "Comandos disponíveis:\n\n"
+        "/top - Melhores oportunidades de mercado\n"
+        "/security ENDERECO - Análise de segurança\n"
+        "/help - Ajuda"
     )
 
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================================
+# COMANDO HELP
+# =========================================================
+
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     await update.message.reply_text(
-        "🟢 MEME RADAR AI está online!\n\n"
-        "Scanner: 🟢\n"
-        "Dados de mercado: 🟢\n"
-        "Segurança: 🟡\n"
-        "Wallet Intelligence: 🟡\n"
-        "IA: 🟡"
+        "🤖 MEME RADAR AI\n\n"
+        "📊 /top\n"
+        "Mostra os tokens com melhor atividade "
+        "de mercado.\n\n"
+
+        "🛡️ /security ENDERECO\n"
+        "Analisa segurança, autoridades, holders "
+        "e liquidez.\n\n"
+
+        "Exemplo:\n"
+        "/security ENDERECO_DO_TOKEN\n\n"
+
+        "⚠️ As análises são informativas e não "
+        "garantem lucro."
     )
 
 
-async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================================
+# COMANDO TOP
+# =========================================================
+
+async def top(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
-        "🔎 Procurando memecoins na Solana...\n"
-        "⏳ Filtrando liquidez, volume e movimento..."
+        "📡 MEME RADAR AI\n\n"
+        "🔎 Procurando oportunidades na Solana...\n"
+        "⏳ Aguarde..."
     )
 
     try:
 
-        url = "https://api.dexscreener.com/token-profiles/latest/v1"
-
-        response = requests.get(
-            url,
-            timeout=15
+        profiles_url = (
+            "https://api.dexscreener.com/"
+            "token-profiles/latest/v1"
         )
 
-        if response.status_code != 200:
-            await update.message.reply_text(
-                "❌ Não consegui buscar os tokens agora."
-            )
-            return
+        response = requests.get(
+            profiles_url,
+            timeout=20
+        )
+
+        response.raise_for_status()
 
         profiles = response.json()
 
-        if not isinstance(profiles, list):
-            await update.message.reply_text(
-                "❌ A resposta da API não veio no formato esperado."
+        candidates = []
+
+        for profile in profiles:
+
+            if profile.get("chainId") != "solana":
+                continue
+
+            token_address = profile.get(
+                "tokenAddress"
             )
-            return
 
-        solana_tokens = []
-
-        for token in profiles:
-
-            if token.get("chainId") != "solana":
+            if not token_address:
                 continue
-
-            address = token.get("tokenAddress")
-
-            if not address:
-                continue
-
-            solana_tokens.append(address)
-
-        # Remove endereços duplicados
-        solana_tokens = list(dict.fromkeys(solana_tokens))
-
-        candidatos = []
-
-        # Limita a quantidade de consultas
-        # para evitar excesso de chamadas à API.
-        for address in solana_tokens[:30]:
 
             try:
 
                 token_url = (
-                    "https://api.dexscreener.com/latest/dex/tokens/"
-                    + address
+                    "https://api.dexscreener.com/"
+                    "latest/dex/tokens/"
+                    f"{token_address}"
                 )
 
                 token_response = requests.get(
                     token_url,
-                    timeout=10
+                    timeout=15
                 )
 
-                if token_response.status_code != 200:
-                    continue
+                token_response.raise_for_status()
 
                 token_data = token_response.json()
 
-                pairs = token_data.get("pairs", [])
+                pairs = token_data.get(
+                    "pairs",
+                    []
+                )
 
-                pairs = [
-                    pair for pair in pairs
+                solana_pairs = [
+                    pair
+                    for pair in pairs
                     if pair.get("chainId") == "solana"
                 ]
 
-                if not pairs:
+                if not solana_pairs:
                     continue
 
-                # Escolhe o par com maior liquidez
-                pair = max(
-                    pairs,
-                    key=lambda x: (
-                        x.get("liquidity", {}).get("usd", 0)
-                        or 0
+                best_pair = max(
+                    solana_pairs,
+                    key=lambda pair: (
+                        pair.get(
+                            "liquidity",
+                            {}
+                        ).get("usd") or 0
                     )
                 )
 
-                base_token = pair.get("baseToken", {})
-
-                name = base_token.get(
-                    "name",
-                    "Desconhecido"
+                base_token = best_pair.get(
+                    "baseToken",
+                    {}
                 )
 
                 symbol = base_token.get(
                     "symbol",
-                    "???"
+                    "N/D"
                 )
 
-                # Ignora SOL e símbolos claramente relacionados
-                # à moeda nativa da rede.
+                name = base_token.get(
+                    "name",
+                    "Token"
+                )
+
+                # Ignorar SOL / WSOL
                 if symbol.upper() in [
                     "SOL",
                     "WSOL"
@@ -266,22 +319,26 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
 
                 liquidity = (
-                    pair.get("liquidity", {}).get("usd", 0)
-                    or 0
+                    best_pair
+                    .get("liquidity", {})
+                    .get("usd") or 0
                 )
 
                 volume = (
-                    pair.get("volume", {}).get("h24", 0)
-                    or 0
+                    best_pair
+                    .get("volume", {})
+                    .get("h24") or 0
                 )
 
                 price_change = (
-                    pair.get("priceChange", {}).get("h24", 0)
-                    or 0
+                    best_pair
+                    .get("priceChange", {})
+                    .get("h24") or 0
                 )
 
                 market_cap = (
-                    pair.get("marketCap", 0)
+                    best_pair.get("marketCap")
+                    or best_pair.get("fdv")
                     or 0
                 )
 
@@ -292,286 +349,159 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if volume < 10000:
                     continue
 
-                score = 0
+                # =================================================
+                # SCORE DE MERCADO
+                # =================================================
 
-                # Liquidez
-                if liquidity >= 250000:
-                    score += 30
-                elif liquidity >= 100000:
-                    score += 25
-                elif liquidity >= 50000:
-                    score += 20
+                liquidity_score = min(
+                    liquidity / 50000 * 30,
+                    30
+                )
+
+                volume_score = min(
+                    volume / 500000 * 30,
+                    30
+                )
+
+                # Evita premiar demais movimentos parabólicos
+                if price_change >= 50:
+                    movement_score = 5
+
+                elif price_change > 0:
+                    movement_score = min(
+                        price_change / 10,
+                        20
+                    )
+
                 else:
-                    score += 10
+                    movement_score = 0
 
-                # Volume
-                if volume >= 500000:
-                    score += 30
-                elif volume >= 200000:
-                    score += 25
-                elif volume >= 50000:
-                    score += 20
-                else:
-                    score += 10
+                volume_liquidity_ratio = (
+                    volume / liquidity
+                    if liquidity > 0
+                    else 0
+                )
 
-                # Movimento
-                if 5 <= price_change <= 50:
-                    score += 20
-                elif 0 < price_change < 5:
-                    score += 10
-                elif price_change > 50:
-                    # Evita premiar movimentos extremamente esticados
-                    score += 5
+                ratio_score = min(
+                    volume_liquidity_ratio / 10 * 20,
+                    20
+                )
 
-                # Relação volume/liquidez
-                if liquidity > 0:
+                score = (
+                    liquidity_score
+                    + volume_score
+                    + movement_score
+                    + ratio_score
+                )
 
-                    volume_ratio = volume / liquidity
-
-                    if volume_ratio >= 2:
-                        score += 20
-                    elif volume_ratio >= 1:
-                        score += 15
-                    elif volume_ratio >= 0.5:
-                        score += 10
-
-                candidatos.append({
+                candidates.append({
                     "name": name,
                     "symbol": symbol,
-                    "address": address,
+                    "address": token_address,
                     "liquidity": liquidity,
                     "volume": volume,
                     "price_change": price_change,
                     "market_cap": market_cap,
-                    "score": min(score, 100)
+                    "score": score
                 })
 
             except Exception as token_error:
 
                 print(
-                    "ERRO TOKEN:",
-                    token_error
+                    "ERRO TOKEN TOP:",
+                    repr(token_error)
                 )
 
                 continue
 
-        # Remove possíveis duplicados
-        candidatos_unicos = {}
+            if len(candidates) >= 30:
+                break
 
-        for token in candidatos:
-
-            address = token["address"]
-
-            if (
-                address not in candidatos_unicos
-                or token["score"]
-                > candidatos_unicos[address]["score"]
-            ):
-                candidatos_unicos[address] = token
-
-        candidatos = list(
-            candidatos_unicos.values()
-        )
-
-        candidatos.sort(
-            key=lambda x: x["score"],
+        candidates.sort(
+            key=lambda item: item["score"],
             reverse=True
         )
 
-        candidatos = candidatos[:5]
+        top_tokens = candidates[:5]
 
-        if not candidatos:
+        if not top_tokens:
 
             await update.message.reply_text(
-                "⚠️ Não encontrei memecoins suficientes "
-                "passando pelos filtros atuais."
+                "❌ Não encontrei tokens suficientes "
+                "com os filtros atuais."
             )
 
             return
 
         message = (
-            "🏆 TOP MEMECOINS — SOLANA\n\n"
+            "🔥 MEME RADAR AI — TOP 5\n\n"
+            "Ranking baseado em dados de mercado.\n"
+            "Ainda não considera segurança, "
+            "carteiras, comunidade ou notícias.\n\n"
         )
 
-        for i, token in enumerate(candidatos, 1):
+        for index, token in enumerate(
+            top_tokens,
+            start=1
+        ):
 
             message += (
-                f"{i}️⃣ {token['name']} "
+                f"{index}️⃣ {token['name']} "
                 f"({token['symbol']})\n"
-                f"🎯 Score de mercado: "
-                f"{token['score']}/100\n"
+                f"📊 Score mercado: "
+                f"{token['score']:.0f}/100\n"
                 f"💧 Liquidez: "
                 f"${token['liquidity']:,.0f}\n"
-                f"📊 Volume 24h: "
+                f"📈 Volume 24h: "
                 f"${token['volume']:,.0f}\n"
-                f"📈 Movimento 24h: "
-                f"{token['price_change']}%\n"
-                f"💵 Market Cap: "
+                f"🚀 Movimento: "
+                f"{token['price_change']:.2f}%\n"
+                f"💰 MC: "
                 f"${token['market_cap']:,.0f}\n"
-                f"🔗 {token['address']}\n\n"
+                f"🪙 `{token['address']}`\n\n"
             )
 
         message += (
-            "⚠️ IMPORTANTE\n\n"
-            "Esse é apenas um ranking inicial "
-            "de mercado.\n\n"
-            "❌ Ainda não verifica:\n"
-            "• Segurança do contrato\n"
-            "• Rug pull\n"
-            "• Honeypot\n"
-            "• Wallets do dev\n"
-            "• Concentração dos holders\n"
-            "• Comunidade\n"
-            "• Notícias\n\n"
-            "🚫 Portanto, nenhum token aqui "
-            "é sinal de compra."
+            "⚠️ IMPORTANTE\n"
+            "Esse ranking NÃO é sinal de compra.\n"
+            "Um token pode ter volume alto e ainda "
+            "ser extremamente arriscado.\n\n"
+            "Próxima etapa: Security + Wallet "
+            "Intelligence."
         )
 
         await update.message.reply_text(
-            message
+            message,
+            parse_mode="Markdown"
         )
 
     except Exception as error:
 
         print(
             "ERRO TOP:",
-            error
+            repr(error)
         )
 
         await update.message.reply_text(
-            "❌ Erro ao analisar o mercado.\n\n"
-            "Verifique os logs do Railway."
+            "❌ Erro no Market Engine.\n\n"
+            f"Detalhes: {error}"
         )
 
 
-async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================================
+# COMANDO SECURITY
+# =========================================================
 
-    if not context.args:
-        await update.message.reply_text(
-            "🔎 Você precisa colocar o endereço do token.\n\n"
-            "Exemplo:\n"
-            "/analyze ENDERECO_DO_TOKEN"
-        )
-        return
-
-    token_address = context.args[0]
-
-    await update.message.reply_text(
-        "🔎 Procurando dados do token...\n"
-        "⏳ Aguarde..."
-    )
-
-    try:
-        url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
-
-        response = requests.get(
-            url,
-            timeout=15
-        )
-
-        if response.status_code != 200:
-            await update.message.reply_text(
-                "❌ Não consegui consultar esse token.\n\n"
-                "Verifique se o endereço está correto."
-            )
-            return
-
-        data = response.json()
-
-        pairs = data.get("pairs")
-
-        if not pairs:
-            await update.message.reply_text(
-                "❌ Não encontrei dados para esse endereço."
-            )
-            return
-
-        # Procurar o par com maior liquidez
-        pairs = [
-            pair for pair in pairs
-            if pair.get("liquidity")
-        ]
-
-        if not pairs:
-            await update.message.reply_text(
-                "❌ Encontrei o token, mas não encontrei liquidez."
-            )
-            return
-
-        pair = max(
-            pairs,
-            key=lambda x: x.get("liquidity", {}).get("usd", 0) or 0
-        )
-
-        base_token = pair.get("baseToken", {})
-
-        name = base_token.get("name", "Desconhecido")
-        symbol = base_token.get("symbol", "???")
-
-        price = pair.get("priceUsd", "N/D")
-
-        liquidity = pair.get(
-            "liquidity", {}
-        ).get("usd", 0)
-
-        volume = pair.get(
-            "volume", {}
-        ).get("h24", 0)
-
-        market_cap = pair.get(
-            "marketCap", 0
-        )
-
-        fdv = pair.get(
-            "fdv", 0
-        )
-
-        price_change = pair.get(
-            "priceChange", {}
-        ).get("h24", 0)
-
-        dex = pair.get(
-            "dexId",
-            "N/D"
-        )
-
-        chain = pair.get(
-            "chainId",
-            "N/D"
-        )
-
-        message = (
-            "🔎 ANÁLISE DE MERCADO\n\n"
-            f"🪙 {name} ({symbol})\n"
-            f"⛓️ Rede: {chain}\n"
-            f"🏦 DEX: {dex}\n\n"
-            f"💰 Preço: ${price}\n"
-            f"💧 Liquidez: ${liquidity:,.0f}\n"
-            f"📊 Volume 24h: ${volume:,.0f}\n"
-            f"💵 Market Cap: ${market_cap:,.0f}\n"
-            f"🏷️ FDV: ${fdv:,.0f}\n"
-            f"📈 Variação 24h: {price_change}%\n\n"
-            "⚠️ Isso é apenas análise de mercado.\n"
-            "Ainda não representa um sinal de compra."
-        )
-
-        await update.message.reply_text(message)
-
-    except Exception as error:
-
-        print("ERRO:", error)
-
-        await update.message.reply_text(
-            "❌ Aconteceu um erro ao consultar o token.\n\n"
-            "Vamos verificar os logs."
-        )
-
-async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def security(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     if not context.args:
 
         await update.message.reply_text(
-            "🛡️ Você precisa colocar o endereço do token.\n\n"
+            "🛡️ Você precisa colocar o endereço "
+            "do token.\n\n"
             "Exemplo:\n"
             "/security ENDERECO_DO_TOKEN"
         )
@@ -588,9 +518,9 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
-        # ==========================================
+        # =====================================================
         # 1. DADOS DO MINT
-        # ==========================================
+        # =====================================================
 
         result = solana_rpc(
             "getAccountInfo",
@@ -603,7 +533,11 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         )
 
-        account = result.get("value") if result else None
+        account = (
+            result.get("value")
+            if result
+            else None
+        )
 
         if not account:
 
@@ -614,11 +548,20 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             return
 
-        data = account.get("data", {})
+        data = account.get(
+            "data",
+            {}
+        )
 
-        parsed = data.get("parsed", {})
+        parsed = data.get(
+            "parsed",
+            {}
+        )
 
-        info = parsed.get("info", {})
+        info = parsed.get(
+            "info",
+            {}
+        )
 
         mint_authority = info.get(
             "mintAuthority"
@@ -643,9 +586,9 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "N/D"
         )
 
-        # ==========================================
+        # =====================================================
         # 2. MINT AUTHORITY
-        # ==========================================
+        # =====================================================
 
         if mint_authority:
 
@@ -655,9 +598,9 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             mint_status = "✅ REVOGADA"
 
-        # ==========================================
+        # =====================================================
         # 3. FREEZE AUTHORITY
-        # ==========================================
+        # =====================================================
 
         if freeze_authority:
 
@@ -667,9 +610,9 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             freeze_status = "✅ REVOGADA"
 
-        # ==========================================
+        # =====================================================
         # 4. HOLDER INTELLIGENCE
-        # ==========================================
+        # =====================================================
 
         largest_result = solana_rpc(
             "getTokenLargestAccounts",
@@ -686,18 +629,23 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if largest_result:
 
             largest_accounts = (
-                largest_result.get("value", [])
+                largest_result.get(
+                    "value",
+                    []
+                )
             )
 
-        # ==========================================
+        # =====================================================
         # 5. CALCULAR CONCENTRAÇÃO
-        # ==========================================
+        # =====================================================
 
         try:
 
-            supply_number = int(supply)
+            supply_number = int(
+                supply
+            )
 
-        except:
+        except Exception:
 
             supply_number = 0
 
@@ -720,97 +668,116 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 top_10_percentage += percentage
 
-        # ==========================================
-        # 6. CLASSIFICAÇÃO DOS HOLDERS
-        # ==========================================
+        # =====================================================
+        # 6. CLASSIFICAÇÃO
+        # =====================================================
 
         if top_10_percentage >= 70:
 
-            concentration_status = "🔴 MUITO ALTA"
+            concentration_status = (
+                "🔴 MUITO ALTA"
+            )
 
         elif top_10_percentage >= 50:
 
-            concentration_status = "🟠 ALTA"
+            concentration_status = (
+                "🟠 ALTA"
+            )
 
         elif top_10_percentage >= 30:
 
-            concentration_status = "🟡 MODERADA"
+            concentration_status = (
+                "🟡 MODERADA"
+            )
 
         else:
 
-            concentration_status = "🟢 BAIXA"
+            concentration_status = (
+                "🟢 BAIXA"
+            )
 
-        # ==========================================
+        # =====================================================
         # 7. LIQUIDEZ
-        # ==========================================
+        # =====================================================
 
         liquidity_data = get_liquidity_data(
             token_address
         )
 
+        liquidity_message = (
+            "💧 LIQUIDEZ\n"
+            "Não foi possível obter dados."
+        )
+
         if liquidity_data:
 
-            liquidity = liquidity_data["liquidity"]
+            liquidity = (
+                liquidity_data["liquidity"]
+            )
 
-            market_cap = liquidity_data["market_cap"]
+            market_cap = (
+                liquidity_data["market_cap"]
+            )
 
-            volume_24h = liquidity_data["volume_24h"]
+            volume_24h = (
+                liquidity_data["volume_24h"]
+            )
 
-            price_change_24h = (
+            price_change = (
                 liquidity_data["price_change_24h"]
             )
 
-            liquidity_ratio = (
-                liquidity_data["liquidity_ratio"]
+            dex_id = (
+                liquidity_data["dex_id"]
             )
-
-            dex = liquidity_data["dex"]
 
             pair_address = (
                 liquidity_data["pair_address"]
             )
 
-            if liquidity >= 100000:
+            if liquidity >= 50000:
 
-                liquidity_status = "🟢 MUITO BOA"
+                liquidity_status = (
+                    "🟢 BOA"
+                )
 
-            elif liquidity >= 50000:
+            elif liquidity >= 15000:
 
-                liquidity_status = "🟢 BOA"
+                liquidity_status = (
+                    "🟡 MODERADA"
+                )
 
-            elif liquidity >= 20000:
+            elif liquidity >= 5000:
 
-                liquidity_status = "🟡 MODERADA"
+                liquidity_status = (
+                    "🟠 BAIXA"
+                )
 
             else:
 
-                liquidity_status = "🔴 BAIXA"
+                liquidity_status = (
+                    "🔴 MUITO BAIXA"
+                )
 
-            liquidity_text = (
+            liquidity_message = (
                 "💧 LIQUIDEZ\n"
-                f"Liquidez: ${liquidity:,.0f}\n"
-                f"Market Cap: ${market_cap:,.0f}\n"
-                f"Volume 24h: ${volume_24h:,.0f}\n"
+                f"Liquidez: "
+                f"${liquidity:,.0f}\n"
+                f"Market Cap: "
+                f"${market_cap:,.0f}\n"
+                f"Volume 24h: "
+                f"${volume_24h:,.0f}\n"
                 f"Variação 24h: "
-                f"{price_change_24h:+.2f}%\n\n"
-                f"Liquidez/MC: "
-                f"{liquidity_ratio:.2f}%\n"
-                f"DEX: {dex}\n"
-                f"Pool: `{pair_address}`\n\n"
-                f"Situação: {liquidity_status}\n\n"
+                f"{price_change:.2f}%\n\n"
+                f"Liquidez: "
+                f"{liquidity_status}\n"
+                f"DEX: {dex_id}\n"
+                f"Pool: `{pair_address}`"
             )
 
-        else:
-
-            liquidity_text = (
-                "💧 LIQUIDEZ\n"
-                "⚠️ Não foi possível encontrar "
-                "uma pool válida.\n\n"
-            )
-
-        # ==========================================
+        # =====================================================
         # 8. MONTAR RESPOSTA
-        # ==========================================
+        # =====================================================
 
         message = (
             "🛡️ SECURITY ENGINE\n\n"
@@ -841,12 +808,13 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Concentração: "
             f"{concentration_status}\n\n"
 
-            f"{liquidity_text}"
+            f"{liquidity_message}\n\n"
 
-            "📊 PRÓXIMA ANÁLISE\n"
+            "📊 PRÓXIMAS ANÁLISES\n"
             "• Carteira do dev\n"
             "• Histórico on-chain\n"
             "• Relação entre carteiras\n"
+            "• Liquidez e pool\n"
             "• Risco de rug pull\n\n"
 
             "⚠️ Ainda não é um Security Score."
@@ -868,53 +836,54 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Erro dentro do Security Engine.\n\n"
             f"Detalhes: {error}"
         )
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
 
-    await update.message.reply_text(
-        "🤖 COMANDOS DO MEME RADAR AI\n\n"
-        "/start — Iniciar\n"
-        "/top — Oportunidades\n"
-        "/analyze — Analisar token\n"
-        "/security — Segurança do token\n"
-        "/status — Status\n"
-        "/help — Ajuda"
-    )
 
+# =========================================================
+# INICIALIZAÇÃO DO BOT
+# =========================================================
 
 def main():
 
-    app = Application.builder().token(TOKEN).build()
-
-    app.add_handler(
-        CommandHandler("start", start)
+    application = (
+        Application
+        .builder()
+        .token(TOKEN)
+        .build()
     )
 
-    app.add_handler(
-        CommandHandler("status", status)
+    application.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
-    app.add_handler(
-        CommandHandler("top", top)
+    application.add_handler(
+        CommandHandler(
+            "help",
+            help_command
+        )
     )
 
-    app.add_handler(
-        CommandHandler("analyze", analyze)
+    application.add_handler(
+        CommandHandler(
+            "top",
+            top
+        )
     )
 
-    app.add_handler(
-        CommandHandler("security", security)
+    application.add_handler(
+        CommandHandler(
+            "security",
+            security
+        )
     )
 
-    app.add_handler(
-        CommandHandler("help", help_command)
+    print(
+        "🤖 Meme Radar AI iniciado."
     )
 
-    print("🤖 Meme Radar AI iniciado!")
-
-    app.run_polling()
+    application.run_polling()
 
 
 if __name__ == "__main__":

@@ -34,13 +34,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "🔎 Procurando oportunidades na Solana...\n"
-        "⏳ Analisando mercado..."
+        "🔎 Procurando memecoins na Solana...\n"
+        "⏳ Filtrando liquidez, volume e movimento..."
     )
 
     try:
 
-        url = "https://api.dexscreener.com/latest/dex/search?q=SOL"
+        url = "https://api.dexscreener.com/token-profiles/latest/v1"
 
         response = requests.get(
             url,
@@ -49,93 +49,204 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if response.status_code != 200:
             await update.message.reply_text(
-                "❌ Não consegui consultar o mercado agora."
+                "❌ Não consegui buscar os tokens agora."
             )
             return
 
-        data = response.json()
+        profiles = response.json()
 
-        pairs = data.get("pairs", [])
+        if not isinstance(profiles, list):
+            await update.message.reply_text(
+                "❌ A resposta da API não veio no formato esperado."
+            )
+            return
 
-        solana_pairs = [
-            pair for pair in pairs
-            if pair.get("chainId") == "solana"
-        ]
+        solana_tokens = []
+
+        for token in profiles:
+
+            if token.get("chainId") != "solana":
+                continue
+
+            address = token.get("tokenAddress")
+
+            if not address:
+                continue
+
+            solana_tokens.append(address)
+
+        # Remove endereços duplicados
+        solana_tokens = list(dict.fromkeys(solana_tokens))
 
         candidatos = []
 
-        for pair in solana_pairs:
+        # Limita a quantidade de consultas
+        # para evitar excesso de chamadas à API.
+        for address in solana_tokens[:30]:
 
-            liquidity = (
-                pair.get("liquidity", {}).get("usd", 0) or 0
-            )
+            try:
 
-            volume = (
-                pair.get("volume", {}).get("h24", 0) or 0
-            )
+                token_url = (
+                    "https://api.dexscreener.com/latest/dex/tokens/"
+                    + address
+                )
 
-            price_change = (
-                pair.get("priceChange", {}).get("h24", 0) or 0
-            )
+                token_response = requests.get(
+                    token_url,
+                    timeout=10
+                )
 
-            if liquidity < 10000:
+                if token_response.status_code != 200:
+                    continue
+
+                token_data = token_response.json()
+
+                pairs = token_data.get("pairs", [])
+
+                pairs = [
+                    pair for pair in pairs
+                    if pair.get("chainId") == "solana"
+                ]
+
+                if not pairs:
+                    continue
+
+                # Escolhe o par com maior liquidez
+                pair = max(
+                    pairs,
+                    key=lambda x: (
+                        x.get("liquidity", {}).get("usd", 0)
+                        or 0
+                    )
+                )
+
+                base_token = pair.get("baseToken", {})
+
+                name = base_token.get(
+                    "name",
+                    "Desconhecido"
+                )
+
+                symbol = base_token.get(
+                    "symbol",
+                    "???"
+                )
+
+                # Ignora SOL e símbolos claramente relacionados
+                # à moeda nativa da rede.
+                if symbol.upper() in [
+                    "SOL",
+                    "WSOL"
+                ]:
+                    continue
+
+                liquidity = (
+                    pair.get("liquidity", {}).get("usd", 0)
+                    or 0
+                )
+
+                volume = (
+                    pair.get("volume", {}).get("h24", 0)
+                    or 0
+                )
+
+                price_change = (
+                    pair.get("priceChange", {}).get("h24", 0)
+                    or 0
+                )
+
+                market_cap = (
+                    pair.get("marketCap", 0)
+                    or 0
+                )
+
+                # Filtros mínimos
+                if liquidity < 15000:
+                    continue
+
+                if volume < 10000:
+                    continue
+
+                score = 0
+
+                # Liquidez
+                if liquidity >= 250000:
+                    score += 30
+                elif liquidity >= 100000:
+                    score += 25
+                elif liquidity >= 50000:
+                    score += 20
+                else:
+                    score += 10
+
+                # Volume
+                if volume >= 500000:
+                    score += 30
+                elif volume >= 200000:
+                    score += 25
+                elif volume >= 50000:
+                    score += 20
+                else:
+                    score += 10
+
+                # Movimento
+                if 5 <= price_change <= 50:
+                    score += 20
+                elif 0 < price_change < 5:
+                    score += 10
+                elif price_change > 50:
+                    # Evita premiar movimentos extremamente esticados
+                    score += 5
+
+                # Relação volume/liquidez
+                if liquidity > 0:
+
+                    volume_ratio = volume / liquidity
+
+                    if volume_ratio >= 2:
+                        score += 20
+                    elif volume_ratio >= 1:
+                        score += 15
+                    elif volume_ratio >= 0.5:
+                        score += 10
+
+                candidatos.append({
+                    "name": name,
+                    "symbol": symbol,
+                    "address": address,
+                    "liquidity": liquidity,
+                    "volume": volume,
+                    "price_change": price_change,
+                    "market_cap": market_cap,
+                    "score": min(score, 100)
+                })
+
+            except Exception as token_error:
+
+                print(
+                    "ERRO TOKEN:",
+                    token_error
+                )
+
                 continue
 
-            if volume < 5000:
-                continue
+        # Remove possíveis duplicados
+        candidatos_unicos = {}
 
-            score = 0
+        for token in candidatos:
 
-            if liquidity >= 50000:
-                score += 30
-            elif liquidity >= 25000:
-                score += 20
-            else:
-                score += 10
+            address = token["address"]
 
-            if volume >= 100000:
-                score += 30
-            elif volume >= 50000:
-                score += 20
-            else:
-                score += 10
+            if (
+                address not in candidatos_unicos
+                or token["score"]
+                > candidatos_unicos[address]["score"]
+            ):
+                candidatos_unicos[address] = token
 
-            if price_change > 20:
-                score += 20
-            elif price_change > 5:
-                score += 15
-            elif price_change > 0:
-                score += 10
-
-            if volume > liquidity:
-                score += 20
-
-            base_token = pair.get("baseToken", {})
-
-            name = base_token.get(
-                "name",
-                "Desconhecido"
-            )
-
-            symbol = base_token.get(
-                "symbol",
-                "???"
-            )
-
-            address = base_token.get(
-                "address",
-                ""
-            )
-
-            candidatos.append({
-                "name": name,
-                "symbol": symbol,
-                "address": address,
-                "liquidity": liquidity,
-                "volume": volume,
-                "price_change": price_change,
-                "score": score
-            })
+        candidatos = list(
+            candidatos_unicos.values()
+        )
 
         candidatos.sort(
             key=lambda x: x["score"],
@@ -145,45 +256,65 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         candidatos = candidatos[:5]
 
         if not candidatos:
+
             await update.message.reply_text(
-                "⚠️ Não encontrei oportunidades suficientes "
-                "com os filtros atuais."
+                "⚠️ Não encontrei memecoins suficientes "
+                "passando pelos filtros atuais."
             )
+
             return
 
-        message = "🏆 TOP OPORTUNIDADES — SOLANA\n\n"
+        message = (
+            "🏆 TOP MEMECOINS — SOLANA\n\n"
+        )
 
         for i, token in enumerate(candidatos, 1):
 
             message += (
                 f"{i}️⃣ {token['name']} "
                 f"({token['symbol']})\n"
-                f"🎯 Score: {token['score']}/100\n"
+                f"🎯 Score de mercado: "
+                f"{token['score']}/100\n"
                 f"💧 Liquidez: "
                 f"${token['liquidity']:,.0f}\n"
                 f"📊 Volume 24h: "
                 f"${token['volume']:,.0f}\n"
                 f"📈 Movimento 24h: "
                 f"{token['price_change']}%\n"
+                f"💵 Market Cap: "
+                f"${token['market_cap']:,.0f}\n"
                 f"🔗 {token['address']}\n\n"
             )
 
         message += (
-            "⚠️ ATENÇÃO\n"
-            "Esse ranking considera apenas dados de mercado.\n"
-            "Ainda NÃO verifica segurança do contrato, "
-            "carteiras ou risco de rug pull.\n\n"
-            "Não é recomendação de compra."
+            "⚠️ IMPORTANTE\n\n"
+            "Esse é apenas um ranking inicial "
+            "de mercado.\n\n"
+            "❌ Ainda não verifica:\n"
+            "• Segurança do contrato\n"
+            "• Rug pull\n"
+            "• Honeypot\n"
+            "• Wallets do dev\n"
+            "• Concentração dos holders\n"
+            "• Comunidade\n"
+            "• Notícias\n\n"
+            "🚫 Portanto, nenhum token aqui "
+            "é sinal de compra."
         )
 
-        await update.message.reply_text(message)
+        await update.message.reply_text(
+            message
+        )
 
     except Exception as error:
 
-        print("ERRO TOP:", error)
+        print(
+            "ERRO TOP:",
+            error
+        )
 
         await update.message.reply_text(
-            "❌ Erro ao analisar o mercado.\n"
+            "❌ Erro ao analisar o mercado.\n\n"
             "Verifique os logs do Railway."
         )
 

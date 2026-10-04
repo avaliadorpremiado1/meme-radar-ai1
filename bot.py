@@ -3,153 +3,139 @@ import requests
 from datetime import datetime, timezone
 
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 
 # =========================================================
-# CONFIGURAÇÕES
+# CONFIGURAÇÃO
 # =========================================================
 
-TOKEN = os.environ["TELEGRAM_TOKEN"]
-SOLANA_RPC = os.environ["SOLANA_RPC"]
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+SOLANA_RPC = os.getenv("SOLANA_RPC")
+
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("TELEGRAM_TOKEN não configurado.")
+
+if not SOLANA_RPC:
+    raise RuntimeError("SOLANA_RPC não configurado.")
 
 
 # =========================================================
 # SOLANA RPC
 # =========================================================
 
-def solana_rpc(method, params):
-
+def solana_rpc(method, params=None):
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": method,
-        "params": params
+        "params": params or []
     }
 
-    response = requests.post(
-        SOLANA_RPC,
-        json=payload,
-        timeout=20
-    )
+    try:
+        response = requests.post(
+            SOLANA_RPC,
+            json=payload,
+            timeout=30
+        )
 
-    response.raise_for_status()
+        response.raise_for_status()
 
-    data = response.json()
+        data = response.json()
 
-    if "error" in data:
-        raise Exception(data["error"])
+        if "error" in data:
+            print("RPC ERROR:", data["error"])
+            return None
 
-    return data.get("result")
+        return data.get("result")
+
+    except Exception as e:
+        print("RPC EXCEPTION:", e)
+        return None
 
 
 # =========================================================
-# DADOS DE LIQUIDEZ / DEXSCREENER
+# DEXSCREENER / LIQUIDEZ
 # =========================================================
 
 def get_liquidity_data(token_address):
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
 
-    url = (
-        "https://api.dexscreener.com/latest/dex/tokens/"
-        f"{token_address}"
-    )
+        response = requests.get(
+            url,
+            timeout=20
+        )
 
-    response = requests.get(
-        url,
-        timeout=20
-    )
+        response.raise_for_status()
 
-    response.raise_for_status()
+        data = response.json()
 
-    data = response.json()
+        pairs = data.get("pairs") or []
 
-    pairs = data.get(
-        "pairs",
-        []
-    )
+        solana_pairs = [
+            pair
+            for pair in pairs
+            if pair.get("chainId") == "solana"
+        ]
 
-    solana_pairs = [
-        pair
-        for pair in pairs
-        if pair.get("chainId") == "solana"
-    ]
+        if not solana_pairs:
+            return None
 
-    if not solana_pairs:
+        solana_pairs.sort(
+            key=lambda x: float(
+                (x.get("liquidity") or {}).get("usd") or 0
+            ),
+            reverse=True
+        )
+
+        pair = solana_pairs[0]
+
+        liquidity = float(
+            (pair.get("liquidity") or {}).get("usd") or 0
+        )
+
+        market_cap = float(
+            pair.get("marketCap") or
+            pair.get("fdv") or
+            0
+        )
+
+        volume_24h = float(
+            (pair.get("volume") or {}).get("h24") or 0
+        )
+
+        price_change_24h = float(
+            (pair.get("priceChange") or {}).get("h24") or 0
+        )
+
+        return {
+            "liquidity": liquidity,
+            "market_cap": market_cap,
+            "volume_24h": volume_24h,
+            "price_change_24h": price_change_24h,
+            "dex": pair.get("dexId") or "N/D",
+            "pair_address": pair.get("pairAddress") or "N/D",
+            "symbol": (pair.get("baseToken") or {}).get("symbol") or "N/D",
+            "name": (pair.get("baseToken") or {}).get("name") or "N/D"
+        }
+
+    except Exception as e:
+        print("DEXSCREENER ERROR:", e)
         return None
 
-    best_pair = max(
-        solana_pairs,
-        key=lambda pair: (
-            pair.get(
-                "liquidity",
-                {}
-            ).get("usd") or 0
-        )
-    )
-
-    liquidity = (
-        best_pair
-        .get("liquidity", {})
-        .get("usd") or 0
-    )
-
-    market_cap = (
-        best_pair.get("marketCap")
-        or best_pair.get("fdv")
-        or 0
-    )
-
-    volume_24h = (
-        best_pair
-        .get("volume", {})
-        .get("h24") or 0
-    )
-
-    price_change_24h = (
-        best_pair
-        .get("priceChange", {})
-        .get("h24") or 0
-    )
-
-    dex_id = best_pair.get(
-        "dexId",
-        "N/D"
-    )
-
-    pair_address = best_pair.get(
-        "pairAddress",
-        "N/D"
-    )
-
-    return {
-        "liquidity": float(liquidity),
-        "market_cap": float(market_cap),
-        "volume_24h": float(volume_24h),
-        "price_change_24h": float(price_change_24h),
-        "dex_id": dex_id,
-        "pair_address": pair_address
-    }
-
 
 # =========================================================
-# IDENTIFICAR OWNER DE TOKEN ACCOUNT
+# TOKEN ACCOUNT OWNER
 # =========================================================
 
-def get_token_account_owner(
-    token_account_address
-):
-
+def get_token_account_owner(token_account):
     result = solana_rpc(
         "getAccountInfo",
         [
-            token_account_address,
+            token_account,
             {
-                "encoding": "jsonParsed",
-                "commitment": "confirmed"
+                "encoding": "jsonParsed"
             }
         ]
     )
@@ -157,42 +143,34 @@ def get_token_account_owner(
     if not result:
         return None
 
-    account = result.get(
-        "value"
-    )
+    value = result.get("value")
 
-    if not account:
+    if not value:
         return None
 
-    data = account.get(
-        "data",
-        {}
-    )
+    data = value.get("data")
 
-    parsed = data.get(
-        "parsed",
-        {}
-    )
+    if not isinstance(data, dict):
+        return None
 
-    info = parsed.get(
-        "info",
-        {}
-    )
+    parsed = data.get("parsed")
 
-    return info.get(
-        "owner"
-    )
+    if not isinstance(parsed, dict):
+        return None
+
+    info = parsed.get("info")
+
+    if not isinstance(info, dict):
+        return None
+
+    return info.get("owner")
 
 
 # =========================================================
-# VERIFICAR SE É A POOL
+# POOL INTELLIGENCE
 # =========================================================
 
-def is_liquidity_pool_wallet(
-    wallet_address,
-    pair_address
-):
-
+def is_liquidity_pool_wallet(wallet_address, pair_address):
     if not wallet_address:
         return False
 
@@ -206,46 +184,36 @@ def is_liquidity_pool_wallet(
 
 
 # =========================================================
-# FORMATAR DATA
+# TIMESTAMP
 # =========================================================
 
 def format_timestamp(timestamp):
-
     if not timestamp:
         return "N/D"
 
     try:
-
-        date = datetime.fromtimestamp(
+        dt = datetime.fromtimestamp(
             timestamp,
             tz=timezone.utc
         )
 
-        return date.strftime(
-            "%d/%m/%Y %H:%M UTC"
-        )
+        return dt.strftime("%d/%m/%Y %H:%M UTC")
 
     except Exception:
-
         return "N/D"
 
 
 # =========================================================
-# BUSCAR HISTÓRICO DO MINT
+# ASSINATURAS DO MINT
 # =========================================================
 
-def get_mint_signatures(
-    token_address,
-    limit=20
-):
-
+def get_mint_signatures(token_address, limit=100):
     result = solana_rpc(
         "getSignaturesForAddress",
         [
             token_address,
             {
-                "limit": limit,
-                "commitment": "confirmed"
+                "limit": limit
             }
         ]
     )
@@ -257,20 +225,16 @@ def get_mint_signatures(
 
 
 # =========================================================
-# BUSCAR TRANSAÇÃO
+# TRANSAÇÃO
 # =========================================================
 
-def get_transaction(
-    signature
-):
-
+def get_transaction(signature):
     return solana_rpc(
         "getTransaction",
         [
             signature,
             {
                 "encoding": "jsonParsed",
-                "commitment": "confirmed",
                 "maxSupportedTransactionVersion": 0
             }
         ]
@@ -278,536 +242,513 @@ def get_transaction(
 
 
 # =========================================================
-# OBTER ACCOUNT KEYS
+# ACCOUNT KEYS
 # =========================================================
 
-def get_account_keys(
-    transaction
-):
+def get_account_keys(transaction):
+    try:
+        message = (
+            transaction
+            .get("transaction", {})
+            .get("message", {})
+        )
 
-    if not transaction:
-        return []
+        account_keys = message.get("accountKeys") or []
 
-    tx = transaction.get(
-        "transaction",
-        {}
-    )
+        result = []
 
-    message = tx.get(
-        "message",
-        {}
-    )
+        for key in account_keys:
 
-    account_keys = message.get(
-        "accountKeys",
-        []
-    )
-
-    keys = []
-
-    for account in account_keys:
-
-        if isinstance(
-            account,
-            dict
-        ):
-
-            pubkey = account.get(
-                "pubkey"
-            )
-
-            if pubkey:
-                keys.append(pubkey)
-
-        elif isinstance(
-            account,
-            str
-        ):
-
-            keys.append(account)
-
-    return keys
-
-
-# =========================================================
-# IDENTIFICAR SIGNATÁRIOS
-# =========================================================
-
-def get_transaction_signers(
-    transaction
-):
-
-    if not transaction:
-        return []
-
-    tx = transaction.get(
-        "transaction",
-        {}
-    )
-
-    message = tx.get(
-        "message",
-        {}
-    )
-
-    account_keys = message.get(
-        "accountKeys",
-        []
-    )
-
-    signers = []
-
-    for account in account_keys:
-
-        if isinstance(
-            account,
-            dict
-        ):
-
-            if account.get(
-                "signer"
-            ):
-
-                pubkey = account.get(
-                    "pubkey"
-                )
+            if isinstance(key, dict):
+                pubkey = key.get("pubkey")
 
                 if pubkey:
-                    signers.append(
-                        pubkey
-                    )
+                    result.append({
+                        "pubkey": pubkey,
+                        "signer": bool(key.get("signer")),
+                        "writable": bool(key.get("writable"))
+                    })
 
-        elif isinstance(
-            account,
-            str
-        ):
+            elif isinstance(key, str):
+                result.append({
+                    "pubkey": key,
+                    "signer": False,
+                    "writable": False
+                })
 
-            if account not in signers:
-                signers.append(account)
+        return result
 
-    return signers
+    except Exception:
+        return []
+
+
+# =========================================================
+# SIGNERS
+# =========================================================
+
+def get_transaction_signers(transaction):
+    keys = get_account_keys(transaction)
+
+    return [
+        item["pubkey"]
+        for item in keys
+        if item.get("signer")
+    ]
 
 
 # =========================================================
 # FEE PAYER
 # =========================================================
 
-def get_fee_payer(
-    transaction
-):
-
-    keys = get_account_keys(
-        transaction
-    )
+def get_fee_payer(transaction):
+    keys = get_account_keys(transaction)
 
     if not keys:
         return None
 
-    return keys[0]
+    return keys[0].get("pubkey")
 
 
 # =========================================================
-# PROCURAR INICIALIZAÇÃO DO MINT
+# NORMALIZA INSTRUÇÕES
 # =========================================================
 
-def inspect_mint_initialization(
-    transaction,
-    token_address
-):
+def extract_instructions(transaction):
+    instructions = []
 
-    if not transaction:
-        return {
-            "found": False,
-            "mint_authority": None,
-            "freeze_authority": None,
-            "instruction": None
-        }
+    try:
+        message = (
+            transaction
+            .get("transaction", {})
+            .get("message", {})
+        )
 
-    tx = transaction.get(
-        "transaction",
-        {}
-    )
+        top_level = message.get("instructions") or []
 
-    message = tx.get(
-        "message",
-        {}
-    )
+        for instruction in top_level:
+            instructions.append({
+                "instruction": instruction,
+                "source": "top-level"
+            })
 
-    instructions = message.get(
-        "instructions",
-        []
-    )
+        meta = transaction.get("meta") or {}
 
-    # Inclui instruções internas quando disponíveis.
-    meta = transaction.get(
-        "meta",
-        {}
-    )
+        inner_groups = meta.get("innerInstructions") or []
 
-    inner_groups = meta.get(
-        "innerInstructions",
-        []
-    )
+        for group in inner_groups:
 
-    all_instructions = list(
-        instructions
-    )
+            for instruction in group.get("instructions") or []:
+                instructions.append({
+                    "instruction": instruction,
+                    "source": "inner"
+                })
 
-    for group in inner_groups:
+    except Exception as e:
+        print("INSTRUCTION ERROR:", e)
 
-        for instruction in group.get(
-            "instructions",
-            []
-        ):
+    return instructions
 
-            all_instructions.append(
-                instruction
-            )
 
-    valid_types = {
-        "initializeMint",
-        "initializeMint2"
-    }
+# =========================================================
+# DETECTA INITIALIZE MINT
+# =========================================================
 
-    for instruction in all_instructions:
+def inspect_mint_initialization(transaction, token_address):
+    findings = []
 
-        if not isinstance(
-            instruction,
-            dict
-        ):
+    instructions = extract_instructions(transaction)
+
+    for item in instructions:
+
+        instruction = item["instruction"]
+
+        if not isinstance(instruction, dict):
             continue
 
-        parsed = instruction.get(
-            "parsed"
-        )
+        parsed = instruction.get("parsed")
 
-        if not isinstance(
-            parsed,
-            dict
-        ):
+        if not isinstance(parsed, dict):
             continue
 
-        instruction_type = parsed.get(
-            "type"
-        )
+        instruction_type = parsed.get("type")
 
-        if instruction_type not in valid_types:
+        if instruction_type not in [
+            "initializeMint",
+            "initializeMint2"
+        ]:
             continue
 
-        info = parsed.get(
-            "info",
-            {}
-        )
+        info = parsed.get("info") or {}
 
-        mint = info.get(
-            "mint"
-        )
+        mint = info.get("mint")
 
         if mint != token_address:
             continue
 
-        return {
-            "found": True,
-            "mint_authority": info.get(
-                "mintAuthority"
-            ),
-            "freeze_authority": info.get(
-                "freezeAuthority"
-            ),
-            "instruction": instruction_type
-        }
+        program = instruction.get("program")
+        program_id = instruction.get("programId")
 
-    return {
-        "found": False,
-        "mint_authority": None,
-        "freeze_authority": None,
-        "instruction": None
-    }
+        findings.append({
+            "type": instruction_type,
+            "source": item["source"],
+            "program": program or "N/D",
+            "program_id": program_id or "N/D",
+            "info": info
+        })
+
+    return findings
 
 
 # =========================================================
-# IDENTIFICAR CANDIDATO A DEPLOYER
+# EXTRAI EVIDÊNCIAS DO MINT
 # =========================================================
 
-def identify_deployer(
+def analyze_mint_initialization_transaction(
+    transaction,
     token_address
 ):
+    findings = inspect_mint_initialization(
+        transaction,
+        token_address
+    )
+
+    if not findings:
+        return []
+
+    fee_payer = get_fee_payer(transaction)
+    signers = get_transaction_signers(transaction)
+
+    evidence = []
+
+    for finding in findings:
+
+        info = finding.get("info") or {}
+
+        mint_authority = info.get("mintAuthority")
+        freeze_authority = info.get("freezeAuthority")
+
+        candidate_wallets = set()
+
+        if fee_payer:
+            candidate_wallets.add(fee_payer)
+
+        for signer in signers:
+            candidate_wallets.add(signer)
+
+        if mint_authority:
+            candidate_wallets.add(mint_authority)
+
+        if freeze_authority:
+            candidate_wallets.add(freeze_authority)
+
+        for wallet in candidate_wallets:
+
+            evidence.append({
+                "wallet": wallet,
+                "fee_payer": wallet == fee_payer,
+                "signer": wallet in signers,
+                "mint_authority": wallet == mint_authority,
+                "freeze_authority": wallet == freeze_authority,
+                "initialize_type": finding.get("type"),
+                "source": finding.get("source"),
+                "program": finding.get("program"),
+                "program_id": finding.get("program_id"),
+                "signature": None
+            })
+
+    return evidence
+
+
+# =========================================================
+# DEV WALLET INTELLIGENCE 3.0
+# =========================================================
+
+def identify_deployer_candidates(token_address, max_signatures=100):
 
     signatures = get_mint_signatures(
         token_address,
-        limit=20
+        limit=max_signatures
     )
 
     if not signatures:
-
         return {
-            "wallet": None,
-            "signature": None,
-            "block_time": None,
-            "signers": [],
-            "fee_payer": None,
-            "mint_initialized": False,
-            "mint_authority": None,
-            "freeze_authority": None,
-            "confidence": "BAIXA",
-            "evidence": [],
-            "reason": (
-                "Nenhuma transação encontrada "
-                "para o mint."
-            )
+            "candidates": [],
+            "initialization_found": False,
+            "transactions_scanned": 0,
+            "initialization_transactions": []
         }
 
-    ordered_signatures = list(
-        reversed(signatures)
-    )
+    # getSignaturesForAddress retorna do mais novo
+    # para o mais antigo.
+    # Vamos inverter para procurar primeiro as mais antigas.
+    ordered_signatures = list(reversed(signatures))
 
-    for item in ordered_signatures:
+    candidate_map = {}
 
-        if item.get("err") is not None:
-            continue
+    initialization_transactions = []
 
-        signature = item.get(
-            "signature"
-        )
+    transactions_scanned = 0
+
+    for signature_info in ordered_signatures:
+
+        signature = signature_info.get("signature")
 
         if not signature:
             continue
 
-        try:
-
-            transaction = get_transaction(
-                signature
-            )
-
-        except Exception as error:
-
-            print(
-                "ERRO TRANSACTION:",
-                repr(error)
-            )
-
+        # Ignora transações explicitamente falhas
+        if signature_info.get("err") is not None:
             continue
+
+        transaction = get_transaction(signature)
+
+        transactions_scanned += 1
 
         if not transaction:
             continue
 
-        signers = get_transaction_signers(
-            transaction
+        findings = inspect_mint_initialization(
+            transaction,
+            token_address
         )
 
-        if not signers:
+        if not findings:
             continue
 
-        candidate = signers[0]
+        fee_payer = get_fee_payer(transaction)
 
-        fee_payer = get_fee_payer(
-            transaction
-        )
+        signers = get_transaction_signers(transaction)
 
-        initialization = (
-            inspect_mint_initialization(
-                transaction,
-                token_address
-            )
-        )
+        initialization_transactions.append({
+            "signature": signature,
+            "slot": transaction.get("slot"),
+            "block_time": transaction.get("blockTime"),
+            "fee_payer": fee_payer,
+            "signers": signers,
+            "findings": findings
+        })
 
-        evidence = []
+        for finding in findings:
 
-        if fee_payer == candidate:
+            info = finding.get("info") or {}
 
-            evidence.append(
-                "É o fee payer da atividade inicial"
-            )
+            mint_authority = info.get("mintAuthority")
+            freeze_authority = info.get("freezeAuthority")
 
-        if initialization["found"]:
+            wallets = set()
 
-            evidence.append(
-                "Participou da transação que "
-                "inicializou o mint"
-            )
+            if fee_payer:
+                wallets.add(fee_payer)
 
-            if (
-                initialization[
-                    "mint_authority"
-                ] == candidate
-            ):
+            for signer in signers:
+                wallets.add(signer)
 
-                evidence.append(
-                    "Foi definida como mint authority"
-                )
+            if mint_authority:
+                wallets.add(mint_authority)
 
-            if (
-                initialization[
-                    "freeze_authority"
-                ] == candidate
-            ):
+            if freeze_authority:
+                wallets.add(freeze_authority)
 
-                evidence.append(
-                    "Foi definida como freeze authority"
-                )
+            for wallet in wallets:
 
-        confidence_score = 0
+                if wallet not in candidate_map:
+                    candidate_map[wallet] = {
+                        "wallet": wallet,
+                        "fee_payer_count": 0,
+                        "signer_count": 0,
+                        "mint_authority_count": 0,
+                        "freeze_authority_count": 0,
+                        "initialize_count": 0,
+                        "initialize_mint_count": 0,
+                        "initialize_mint2_count": 0,
+                        "programs": set(),
+                        "program_ids": set(),
+                        "signatures": [],
+                        "first_initialization": None
+                    }
 
-        if len(signers) == 1:
-            confidence_score += 20
+                candidate = candidate_map[wallet]
 
-        if fee_payer == candidate:
-            confidence_score += 25
+                if wallet == fee_payer:
+                    candidate["fee_payer_count"] += 1
 
-        if initialization["found"]:
-            confidence_score += 35
+                if wallet in signers:
+                    candidate["signer_count"] += 1
 
-        if (
-            initialization[
-                "mint_authority"
-            ] == candidate
-        ):
-            confidence_score += 15
+                if wallet == mint_authority:
+                    candidate["mint_authority_count"] += 1
 
-        if (
-            initialization[
-                "freeze_authority"
-            ] == candidate
-        ):
-            confidence_score += 5
+                if wallet == freeze_authority:
+                    candidate["freeze_authority_count"] += 1
 
-        if confidence_score >= 70:
+                candidate["initialize_count"] += 1
 
-            confidence = "ALTA"
+                if finding.get("type") == "initializeMint":
+                    candidate["initialize_mint_count"] += 1
 
-        elif confidence_score >= 40:
+                if finding.get("type") == "initializeMint2":
+                    candidate["initialize_mint2_count"] += 1
 
+                program = finding.get("program")
+
+                if program:
+                    candidate["programs"].add(program)
+
+                program_id = finding.get("program_id")
+
+                if program_id:
+                    candidate["program_ids"].add(program_id)
+
+                if signature not in candidate["signatures"]:
+                    candidate["signatures"].append(signature)
+
+                block_time = transaction.get("blockTime")
+
+                if (
+                    candidate["first_initialization"] is None
+                    or (
+                        block_time is not None
+                        and block_time < candidate["first_initialization"]
+                    )
+                ):
+                    candidate["first_initialization"] = block_time
+
+    # =====================================================
+    # CALCULA SCORE DOS CANDIDATOS
+    # =====================================================
+
+    candidates = []
+
+    for wallet, candidate in candidate_map.items():
+
+        score = 0
+        reasons = []
+
+        # Evidência mais forte:
+        # wallet aparece como mint authority
+        if candidate["mint_authority_count"] > 0:
+            score += 35
+            reasons.append("Mint authority")
+
+        # Freeze authority também é uma evidência
+        if candidate["freeze_authority_count"] > 0:
+            score += 15
+            reasons.append("Freeze authority")
+
+        # Foi quem pagou a transação de inicialização
+        if candidate["fee_payer_count"] > 0:
+            score += 20
+            reasons.append("Fee payer")
+
+        # Assinou a transação
+        if candidate["signer_count"] > 0:
+            score += 15
+            reasons.append("Signer")
+
+        # Apareceu diretamente em initializeMint
+        if candidate["initialize_count"] > 0:
+            score += 15
+            reasons.append("Participou da inicialização")
+
+        # Limita score
+        score = min(score, 100)
+
+        if score >= 70:
+            confidence = "FORTE"
+            status = "🟢 FORTE EVIDÊNCIA"
+
+        elif score >= 40:
             confidence = "MÉDIA"
+            status = "🟡 POSSÍVEL OPERADOR"
+
+        elif score >= 20:
+            confidence = "BAIXA"
+            status = "⚪ BAIXA EVIDÊNCIA"
 
         else:
+            confidence = "MUITO BAIXA"
+            status = "⚪ EVIDÊNCIA INSUFICIENTE"
 
-            confidence = "BAIXA"
-
-        return {
-            "wallet": candidate,
-            "signature": signature,
-            "block_time": item.get(
-                "blockTime"
-            ),
-            "signers": signers,
-            "fee_payer": fee_payer,
-            "mint_initialized": (
-                initialization["found"]
-            ),
-            "mint_authority": (
-                initialization["mint_authority"]
-            ),
-            "freeze_authority": (
-                initialization["freeze_authority"]
-            ),
+        candidates.append({
+            "wallet": wallet,
+            "score": score,
             "confidence": confidence,
-            "confidence_score": confidence_score,
-            "evidence": evidence,
-            "reason": (
-                "Candidato identificado a partir "
-                "da atividade inicial do mint e "
-                "das evidências disponíveis."
-            )
-        }
+            "status": status,
+            "reasons": reasons,
+            "fee_payer_count": candidate["fee_payer_count"],
+            "signer_count": candidate["signer_count"],
+            "mint_authority_count": candidate["mint_authority_count"],
+            "freeze_authority_count": candidate["freeze_authority_count"],
+            "initialize_count": candidate["initialize_count"],
+            "initialize_mint_count": candidate["initialize_mint_count"],
+            "initialize_mint2_count": candidate["initialize_mint2_count"],
+            "programs": sorted(candidate["programs"]),
+            "program_ids": sorted(candidate["program_ids"]),
+            "signatures": candidate["signatures"],
+            "first_initialization": candidate["first_initialization"]
+        })
+
+    candidates.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
 
     return {
-        "wallet": None,
-        "signature": None,
-        "block_time": None,
-        "signers": [],
-        "fee_payer": None,
-        "mint_initialized": False,
-        "mint_authority": None,
-        "freeze_authority": None,
-        "confidence": "BAIXA",
-        "confidence_score": 0,
-        "evidence": [],
-        "reason": (
-            "Não foi possível identificar "
-            "um signatário da atividade inicial."
-        )
+        "candidates": candidates,
+        "initialization_found": len(initialization_transactions) > 0,
+        "transactions_scanned": transactions_scanned,
+        "initialization_transactions": initialization_transactions
     }
 
 
 # =========================================================
-# HISTÓRICO RECENTE DA DEV WALLET
+# ATIVIDADE DA WALLET
 # =========================================================
 
-def get_wallet_activity(
-    wallet_address,
-    limit=30
-):
+def get_wallet_activity(wallet_address, limit=30):
 
     signatures = solana_rpc(
         "getSignaturesForAddress",
         [
             wallet_address,
             {
-                "limit": limit,
-                "commitment": "confirmed"
+                "limit": limit
             }
         ]
     )
 
     if not signatures:
+        return []
 
-        return {
-            "total": 0,
-            "successful": 0,
-            "failed": 0,
-            "first_seen": None,
-            "last_seen": None
-        }
+    activity = []
 
-    successful = 0
-    failed = 0
+    for signature_info in signatures:
 
-    timestamps = []
+        signature = signature_info.get("signature")
 
-    for item in signatures:
+        if not signature:
+            continue
 
-        if item.get("err"):
+        transaction = get_transaction(signature)
 
-            failed += 1
+        if not transaction:
+            continue
 
-        else:
+        activity.append({
+            "signature": signature,
+            "block_time": transaction.get("blockTime"),
+            "slot": transaction.get("slot"),
+            "success": signature_info.get("err") is None
+        })
 
-            successful += 1
-
-        block_time = item.get(
-            "blockTime"
-        )
-
-        if block_time:
-            timestamps.append(
-                block_time
-            )
-
-    return {
-        "total": len(signatures),
-        "successful": successful,
-        "failed": failed,
-        "first_seen": (
-            min(timestamps)
-            if timestamps
-            else None
-        ),
-        "last_seen": (
-            max(timestamps)
-            if timestamps
-            else None
-        )
-    }
+    return activity
 
 
 # =========================================================
-# TOKEN ACCOUNTS DO DEV
+# TOKEN ACCOUNTS DA WALLET
 # =========================================================
 
-def get_wallet_token_accounts(
-    wallet_address,
-    token_address
-):
+def get_wallet_token_accounts(wallet_address, token_address):
 
     result = solana_rpc(
         "getTokenAccountsByOwner",
@@ -817,8 +758,7 @@ def get_wallet_token_accounts(
                 "mint": token_address
             },
             {
-                "encoding": "jsonParsed",
-                "commitment": "confirmed"
+                "encoding": "jsonParsed"
             }
         ]
     )
@@ -826,36 +766,25 @@ def get_wallet_token_accounts(
     if not result:
         return []
 
-    return result.get(
-        "value",
-        []
-    )
+    return result.get("value") or []
 
 
 # =========================================================
-# SALDO ATUAL DO DEV
+# SALDO DO TOKEN NA WALLET
 # =========================================================
 
-def get_wallet_token_balance(
-    wallet_address,
-    token_address,
-    supply
-):
+def get_wallet_token_balance(wallet_address, token_address):
 
     accounts = get_wallet_token_accounts(
         wallet_address,
         token_address
     )
 
-    total_amount = 0
-    account_count = len(
-        accounts
-    )
+    total = 0.0
 
     for account in accounts:
 
         try:
-
             info = (
                 account
                 .get("account", {})
@@ -864,229 +793,82 @@ def get_wallet_token_balance(
                 .get("info", {})
             )
 
-            token_amount = (
-                info
-                .get("tokenAmount", {})
-                .get("amount", "0")
+            token_amount = info.get("tokenAmount") or {}
+
+            amount = float(
+                token_amount.get("uiAmount") or 0
             )
 
-            total_amount += int(
-                token_amount
-            )
+            total += amount
 
-        except Exception as error:
-
-            print(
-                "ERRO DEV BALANCE:",
-                repr(error)
-            )
-
-    percentage = 0
-
-    try:
-
-        if int(supply) > 0:
-
-            percentage = (
-                total_amount
-                / int(supply)
-            ) * 100
-
-    except Exception:
-
-        percentage = 0
+        except Exception:
+            continue
 
     return {
-        "amount": total_amount,
-        "percentage": percentage,
-        "accounts": account_count
+        "balance": total,
+        "accounts": len(accounts)
     }
 
 
 # =========================================================
-# MAPEAR TOKEN BALANCES DE UMA TRANSAÇÃO
+# TOKEN BALANCE MAP
 # =========================================================
 
-def get_token_balance_map(
-    transaction,
-    token_address
-):
+def get_token_balance_map(transaction, token_address):
 
-    if not transaction:
-        return {}
+    result = {
+        "before": {},
+        "after": {}
+    }
 
-    meta = transaction.get(
-        "meta",
-        {}
-    )
+    meta = transaction.get("meta") or {}
 
-    tx = transaction.get(
-        "transaction",
-        {}
-    )
+    pre_balances = meta.get("preTokenBalances") or []
+    post_balances = meta.get("postTokenBalances") or []
 
-    message = tx.get(
-        "message",
-        {}
-    )
+    for balance in pre_balances:
 
-    account_keys = message.get(
-        "accountKeys",
-        []
-    )
-
-    keys = []
-
-    for account in account_keys:
-
-        if isinstance(
-            account,
-            dict
-        ):
-
-            keys.append(
-                account.get(
-                    "pubkey"
-                )
-            )
-
-        else:
-
-            keys.append(
-                account
-            )
-
-    balances = {}
-
-    pre_balances = (
-        meta.get(
-            "preTokenBalances"
-        )
-        or []
-    )
-
-    post_balances = (
-        meta.get(
-            "postTokenBalances"
-        )
-        or []
-    )
-
-    for item in pre_balances:
-
-        if item.get("mint") != token_address:
+        if balance.get("mint") != token_address:
             continue
 
-        index = item.get(
-            "accountIndex"
-        )
+        owner = balance.get("owner")
 
-        if index is None:
+        if not owner:
             continue
 
-        account_address = (
-            keys[index]
-            if index < len(keys)
-            else None
+        amount = (
+            balance
+            .get("uiTokenAmount", {})
+            .get("uiAmount")
+            or 0
         )
 
-        if not account_address:
+        result["before"][owner] = float(amount)
+
+    for balance in post_balances:
+
+        if balance.get("mint") != token_address:
             continue
 
-        owner = item.get(
-            "owner"
-        )
+        owner = balance.get("owner")
 
-        amount = int(
-            item
-            .get(
-                "uiTokenAmount",
-                {}
-            )
-            .get(
-                "amount",
-                "0"
-            )
-        )
-
-        balances.setdefault(
-            account_address,
-            {
-                "owner": owner,
-                "pre": 0,
-                "post": 0
-            }
-        )
-
-        balances[
-            account_address
-        ]["pre"] = amount
-
-        if owner:
-            balances[
-                account_address
-            ]["owner"] = owner
-
-    for item in post_balances:
-
-        if item.get("mint") != token_address:
+        if not owner:
             continue
 
-        index = item.get(
-            "accountIndex"
+        amount = (
+            balance
+            .get("uiTokenAmount", {})
+            .get("uiAmount")
+            or 0
         )
 
-        if index is None:
-            continue
+        result["after"][owner] = float(amount)
 
-        account_address = (
-            keys[index]
-            if index < len(keys)
-            else None
-        )
-
-        if not account_address:
-            continue
-
-        owner = item.get(
-            "owner"
-        )
-
-        amount = int(
-            item
-            .get(
-                "uiTokenAmount",
-                {}
-            )
-            .get(
-                "amount",
-                "0"
-            )
-        )
-
-        balances.setdefault(
-            account_address,
-            {
-                "owner": owner,
-                "pre": 0,
-                "post": 0
-            }
-        )
-
-        balances[
-            account_address
-        ]["post"] = amount
-
-        if owner:
-            balances[
-                account_address
-            ]["owner"] = owner
-
-    return balances
+    return result
 
 
 # =========================================================
-# ANALISAR MOVIMENTAÇÃO DO TOKEN PELO DEV
+# MOVIMENTAÇÃO DO TOKEN
 # =========================================================
 
 def analyze_dev_token_movements(
@@ -1100,56 +882,36 @@ def analyze_dev_token_movements(
         [
             wallet_address,
             {
-                "limit": limit,
-                "commitment": "confirmed"
+                "limit": limit
             }
         ]
     )
 
     if not signatures:
-
         return {
+            "in": 0.0,
+            "out": 0.0,
             "transactions": 0,
-            "incoming": 0,
-            "outgoing": 0,
-            "counterparties": {},
-            "transfer_signatures": []
+            "counterparties": {}
         }
 
-    incoming = 0
-    outgoing = 0
-
+    total_in = 0.0
+    total_out = 0.0
     counterparties = {}
-    transfer_signatures = []
 
     analyzed = 0
 
-    for item in signatures:
+    for signature_info in signatures:
 
-        if item.get("err") is not None:
-            continue
-
-        signature = item.get(
-            "signature"
-        )
+        signature = signature_info.get("signature")
 
         if not signature:
             continue
 
-        try:
-
-            transaction = get_transaction(
-                signature
-            )
-
-        except Exception as error:
-
-            print(
-                "ERRO DEV TX:",
-                repr(error)
-            )
-
+        if signature_info.get("err") is not None:
             continue
+
+        transaction = get_transaction(signature)
 
         if not transaction:
             continue
@@ -1161,456 +923,969 @@ def analyze_dev_token_movements(
             token_address
         )
 
-        if not balances:
-            continue
+        before = balances["before"]
+        after = balances["after"]
 
-        changes = []
+        owners = set(before.keys()) | set(after.keys())
 
-        for account_address, data in (
-            balances.items()
-        ):
+        wallet_before = before.get(wallet_address, 0.0)
+        wallet_after = after.get(wallet_address, 0.0)
 
-            owner = data.get(
-                "owner"
-            )
+        delta = wallet_after - wallet_before
 
-            if owner == wallet_address:
+        if delta > 0:
+            total_in += delta
 
-                delta = (
-                    data["post"]
-                    - data["pre"]
-                )
+        elif delta < 0:
+            total_out += abs(delta)
 
-                if delta != 0:
-
-                    changes.append(
-                        (
-                            owner,
-                            delta
-                        )
-                    )
-
-        dev_delta = sum(
-            delta
-            for owner, delta in changes
-            if owner == wallet_address
-        )
-
-        if dev_delta == 0:
-            continue
-
-        if dev_delta > 0:
-
-            incoming += dev_delta
-
-        else:
-
-            outgoing += abs(
-                dev_delta
-            )
-
-        for account_address, data in (
-            balances.items()
-        ):
-
-            owner = data.get(
-                "owner"
-            )
-
-            if not owner:
-                continue
+        for owner in owners:
 
             if owner == wallet_address:
                 continue
 
-            delta = (
-                data["post"]
-                - data["pre"]
-            )
+            owner_before = before.get(owner, 0.0)
+            owner_after = after.get(owner, 0.0)
 
-            if delta == 0:
+            owner_delta = owner_after - owner_before
+
+            if owner_delta == 0 or delta == 0:
                 continue
 
-            # Se o dev recebeu tokens,
-            # outros owners provavelmente enviaram.
-            if dev_delta > 0 and delta < 0:
+            if owner not in counterparties:
+                counterparties[owner] = {
+                    "in": 0.0,
+                    "out": 0.0,
+                    "transactions": 0
+                }
 
-                counterparties[
-                    owner
-                ] = (
-                    counterparties.get(
-                        owner,
-                        0
-                    )
-                    + abs(delta)
-                )
+            counterparties[owner]["transactions"] += 1
 
-            # Se o dev enviou tokens,
-            # outros owners provavelmente receberam.
-            elif dev_delta < 0 and delta > 0:
+            if delta > 0 and owner_delta < 0:
+                counterparties[owner]["in"] += abs(delta)
 
-                counterparties[
-                    owner
-                ] = (
-                    counterparties.get(
-                        owner,
-                        0
-                    )
-                    + delta
-                )
-
-        transfer_signatures.append(
-            {
-                "signature": signature,
-                "block_time": transaction.get(
-                    "blockTime"
-                ),
-                "delta": dev_delta
-            }
-        )
+            elif delta < 0 and owner_delta > 0:
+                counterparties[owner]["out"] += abs(delta)
 
     return {
+        "in": total_in,
+        "out": total_out,
         "transactions": analyzed,
-        "incoming": incoming,
-        "outgoing": outgoing,
-        "counterparties": counterparties,
-        "transfer_signatures": transfer_signatures
+        "counterparties": counterparties
     }
 
 
 # =========================================================
-# POSSÍVEIS FONTES DE FINANCIAMENTO
+# POSSÍVEIS FUNDERS
 # =========================================================
 
-def analyze_possible_funders(
-    wallet_address,
-    limit=20
-):
+def analyze_possible_funders(wallet_address, limit=30):
 
     signatures = solana_rpc(
         "getSignaturesForAddress",
         [
             wallet_address,
             {
-                "limit": limit,
-                "commitment": "confirmed"
+                "limit": limit
             }
         ]
     )
 
+    if not signatures:
+        return {}
+
     funders = {}
 
-    if not signatures:
-        return funders
+    for signature_info in signatures:
 
-    for item in signatures:
-
-        if item.get("err") is not None:
-            continue
-
-        signature = item.get(
-            "signature"
-        )
+        signature = signature_info.get("signature")
 
         if not signature:
             continue
 
-        try:
-
-            transaction = get_transaction(
-                signature
-            )
-
-        except Exception:
-
+        if signature_info.get("err") is not None:
             continue
+
+        transaction = get_transaction(signature)
 
         if not transaction:
             continue
 
-        meta = transaction.get(
-            "meta",
-            {}
-        )
+        meta = transaction.get("meta") or {}
 
-        tx = transaction.get(
-            "transaction",
-            {}
-        )
+        pre_balances = meta.get("preBalances") or []
+        post_balances = meta.get("postBalances") or []
 
-        message = tx.get(
-            "message",
-            {}
-        )
+        keys = get_account_keys(transaction)
 
-        account_keys = message.get(
-            "accountKeys",
-            []
-        )
-
-        addresses = []
-
-        for account in account_keys:
-
-            if isinstance(
-                account,
-                dict
-            ):
-
-                addresses.append(
-                    account.get(
-                        "pubkey"
-                    )
-                )
-
-            else:
-
-                addresses.append(
-                    account
-                )
-
-        pre_balances = (
-            meta.get(
-                "preBalances"
-            )
-            or []
-        )
-
-        post_balances = (
-            meta.get(
-                "postBalances"
-            )
-            or []
-        )
-
-        if len(pre_balances) != len(
-            post_balances
-        ):
+        if not pre_balances or not post_balances:
             continue
 
-        dev_index = None
+        for index, key in enumerate(keys):
 
-        for index, address in enumerate(
-            addresses
-        ):
+            pubkey = key.get("pubkey")
 
-            if address == wallet_address:
-
-                dev_index = index
-                break
-
-        if dev_index is None:
-            continue
-
-        dev_delta = (
-            post_balances[dev_index]
-            - pre_balances[dev_index]
-        )
-
-        # Só consideramos como possível
-        # financiamento quando a wallet
-        # teve entrada líquida relevante.
-        if dev_delta <= 0:
-            continue
-
-        for index, address in enumerate(
-            addresses
-        ):
-
-            if not address:
+            if not pubkey:
                 continue
 
-            if address == wallet_address:
+            if pubkey == wallet_address:
                 continue
 
-            delta = (
-                post_balances[index]
-                - pre_balances[index]
-            )
-
-            if delta >= 0:
+            if index >= len(pre_balances):
                 continue
 
-            # Ignora pequenas diferenças
-            # associadas apenas à taxa.
-            if abs(delta) < 10000:
+            if index >= len(post_balances):
                 continue
 
-            funders[
-                address
-            ] = (
-                funders.get(
-                    address,
-                    0
+            before = pre_balances[index]
+            after = post_balances[index]
+
+            delta = after - before
+
+            # A wallet receiving SOL enquanto a wallet analisada
+            # perde SOL pode ser uma possível relação.
+            if delta < 0:
+
+                wallet_index = None
+
+                for i, own_key in enumerate(keys):
+                    if own_key.get("pubkey") == wallet_address:
+                        wallet_index = i
+                        break
+
+                if wallet_index is None:
+                    continue
+
+                if wallet_index >= len(pre_balances):
+                    continue
+
+                if wallet_index >= len(post_balances):
+                    continue
+
+                wallet_delta = (
+                    post_balances[wallet_index]
+                    - pre_balances[wallet_index]
                 )
-                + abs(delta)
-            )
+
+                if wallet_delta > 0:
+
+                    amount_sol = wallet_delta / 1_000_000_000
+
+                    if pubkey not in funders:
+                        funders[pubkey] = 0.0
+
+                    funders[pubkey] += amount_sol
 
     return funders
 
 
 # =========================================================
-# CLASSIFICAR COMPORTAMENTO DO DEV
+# COMPORTAMENTO DO DEV
 # =========================================================
 
 def classify_dev_behavior(
-    dev_data,
     token_balance,
-    movements,
+    token_movements,
     funders
 ):
 
     score = 0
     reasons = []
 
-    confidence = dev_data.get(
-        "confidence",
-        "BAIXA"
-    )
+    balance = token_balance.get("balance", 0.0)
 
-    if confidence == "ALTA":
+    token_in = token_movements.get("in", 0.0)
+    token_out = token_movements.get("out", 0.0)
 
-        score += 30
-        reasons.append(
-            "forte evidência de participação "
-            "na criação do mint"
-        )
+    if token_out > 0:
+        score += 40
+        reasons.append("Saídas de token observadas")
 
-    elif confidence == "MÉDIA":
-
-        score += 15
-
-    if token_balance["percentage"] > 20:
-
-        score += 20
-        reasons.append(
-            "wallet ainda concentra mais de "
-            "20% do supply"
-        )
-
-    elif token_balance["percentage"] > 5:
-
+    if token_in > 0:
         score += 10
-        reasons.append(
-            "wallet ainda possui uma parcela "
-            "relevante do supply"
-        )
+        reasons.append("Entradas de token observadas")
 
-    if movements["outgoing"] > 0:
-
+    if balance > 0:
         score += 10
-        reasons.append(
-            "foram detectadas saídas do token"
-        )
+        reasons.append("Wallet ainda possui tokens")
 
-    if len(
-        movements["counterparties"]
-    ) >= 5:
+    if funders:
+        score += 5
+        reasons.append("Possível financiamento identificado")
 
-        score += 10
-        reasons.append(
-            "existem várias wallets relacionadas "
-            "a movimentações do token"
-        )
-
-    if len(funders) >= 2:
-
-        score += 10
-        reasons.append(
-            "foram encontradas possíveis "
-            "fontes de financiamento"
-        )
+    score = min(score, 100)
 
     if score >= 60:
+        status = "🔴 COMPORTAMENTO DE ATENÇÃO"
 
-        status = "🟠 ATENÇÃO"
-
-    elif score >= 35:
-
-        status = "🟡 OBSERVAR"
+    elif score >= 30:
+        status = "🟡 SINAL MODERADO"
 
     else:
-
         status = "🟢 SEM SINAL FORTE"
 
     return {
-        "score": min(score, 100),
+        "score": score,
         "status": status,
         "reasons": reasons
     }
 
 
 # =========================================================
-# COMANDO START
+# HOLDER INTELLIGENCE
 # =========================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+def get_holder_intelligence(token_address, pair_address):
+
+    result = solana_rpc(
+        "getTokenLargestAccounts",
+        [
+            token_address
+        ]
+    )
+
+    if not result:
+        return None
+
+    value = result.get("value") or []
+
+    if not value:
+        return None
+
+    supply_result = solana_rpc(
+        "getTokenSupply",
+        [
+            token_address
+        ]
+    )
+
+    if not supply_result:
+        return None
+
+    supply_info = supply_result.get("value") or {}
+
+    supply_raw = float(
+        supply_info.get("amount") or 0
+    )
+
+    if supply_raw <= 0:
+        return None
+
+    owner_balances = {}
+
+    pool_percentage = 0.0
+
+    raw_top_10 = 0.0
+
+    token_accounts_analyzed = 0
+
+    for item in value[:20]:
+
+        address = item.get("address")
+
+        amount_raw = float(
+            item.get("amount") or 0
+        )
+
+        if not address:
+            continue
+
+        percentage = (
+            amount_raw / supply_raw
+        ) * 100
+
+        if token_accounts_analyzed < 10:
+            raw_top_10 += percentage
+
+        owner = get_token_account_owner(address)
+
+        if not owner:
+            continue
+
+        token_accounts_analyzed += 1
+
+        if is_liquidity_pool_wallet(
+            owner,
+            pair_address
+        ):
+            pool_percentage += percentage
+            continue
+
+        owner_balances[owner] = (
+            owner_balances.get(owner, 0.0)
+            + percentage
+        )
+
+    sorted_owners = sorted(
+        owner_balances.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    real_concentration = sum(
+        percentage
+        for _, percentage in sorted_owners[:10]
+    )
+
+    if real_concentration < 20:
+        real_status = "🟢 BAIXA"
+
+    elif real_concentration < 40:
+        real_status = "🟡 MODERADA"
+
+    else:
+        real_status = "🔴 ALTA"
+
+    if raw_top_10 < 30:
+        raw_status = "🟢 BAIXA"
+
+    elif raw_top_10 < 50:
+        raw_status = "🟡 MODERADA"
+
+    else:
+        raw_status = "🔴 ALTA"
+
+    return {
+        "accounts_analyzed": token_accounts_analyzed,
+        "raw_top_10": raw_top_10,
+        "raw_status": raw_status,
+        "real_owners": len(sorted_owners),
+        "real_concentration": real_concentration,
+        "real_status": real_status,
+        "pool_percentage": pool_percentage,
+        "top_holders": sorted_owners[:5]
+    }
+
+
+# =========================================================
+# SECURITY
+# =========================================================
+
+async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not context.args:
+        await update.message.reply_text(
+            "Use assim:\n/security TOKEN_ADDRESS"
+        )
+        return
+
+    token_address = context.args[0].strip()
+
+    # -----------------------------------------------------
+    # TOKEN ACCOUNT INFO
+    # -----------------------------------------------------
+
+    account = solana_rpc(
+        "getAccountInfo",
+        [
+            token_address,
+            {
+                "encoding": "jsonParsed"
+            }
+        ]
+    )
+
+    if not account or not account.get("value"):
+        await update.message.reply_text(
+            "❌ Não consegui encontrar esse token na Solana."
+        )
+        return
+
+    value = account["value"]
+
+    data = value.get("data") or {}
+
+    parsed = data.get("parsed") or {}
+
+    info = parsed.get("info") or {}
+
+    mint_authority = info.get("mintAuthority")
+
+    freeze_authority = info.get("freezeAuthority")
+
+    supply = info.get("supply", "N/D")
+
+    decimals = info.get("decimals", "N/D")
+
+    token_program = value.get("owner", "N/D")
+
+    # -----------------------------------------------------
+    # LIQUIDEZ
+    # -----------------------------------------------------
+
+    liquidity_data = get_liquidity_data(
+        token_address
+    )
+
+    if liquidity_data:
+
+        liquidity = liquidity_data["liquidity"]
+        market_cap = liquidity_data["market_cap"]
+        volume_24h = liquidity_data["volume_24h"]
+        price_change = liquidity_data["price_change_24h"]
+        dex = liquidity_data["dex"]
+        pair_address = liquidity_data["pair_address"]
+
+        if liquidity < 10000:
+            liquidity_status = "🔴 BAIXA"
+
+        elif liquidity < 50000:
+            liquidity_status = "🟡 MODERADA"
+
+        else:
+            liquidity_status = "🟢 BOA"
+
+    else:
+
+        liquidity = 0
+        market_cap = 0
+        volume_24h = 0
+        price_change = 0
+        dex = "N/D"
+        pair_address = "N/D"
+        liquidity_status = "⚪ N/D"
+
+    # -----------------------------------------------------
+    # HOLDERS
+    # -----------------------------------------------------
+
+    holder_data = get_holder_intelligence(
+        token_address,
+        pair_address
+    )
+
+    # -----------------------------------------------------
+    # DEV WALLET 3.0
+    # -----------------------------------------------------
+
+    deployer_data = identify_deployer_candidates(
+        token_address,
+        max_signatures=100
+    )
+
+    candidates = deployer_data["candidates"]
+
+    strong_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate["score"] >= 70
+    ]
+
+    medium_candidates = [
+        candidate
+        for candidate in candidates
+        if 40 <= candidate["score"] < 70
+    ]
+
+    # -----------------------------------------------------
+    # MONTA MENSAGEM
+    # -----------------------------------------------------
+
+    message = "🛡️ SECURITY ENGINE\n\n"
+
+    message += "🪙 Token:\n"
+    message += f"{token_address}\n\n"
+
+    # -----------------------------------------------------
+    # MINT
+    # -----------------------------------------------------
+
+    message += "🔐 MINT AUTHORITY\n"
+
+    if mint_authority:
+        message += f"⚠️ ATIVA\n{mint_authority}\n"
+    else:
+        message += "✅ REVOGADA\n"
+
+    message += "\n"
+
+    # -----------------------------------------------------
+
+    message += "🧊 FREEZE AUTHORITY\n"
+
+    if freeze_authority:
+        message += f"⚠️ ATIVA\n{freeze_authority}\n"
+    else:
+        message += "✅ REVOGADA\n"
+
+    message += "\n"
+
+    # -----------------------------------------------------
+
+    message += "🪙 SUPPLY\n"
+    message += f"{supply}\n\n"
+
+    message += "🔢 DECIMAIS\n"
+    message += f"{decimals}\n\n"
+
+    message += "⚙️ TOKEN PROGRAM\n"
+    message += f"{token_program}\n\n"
+
+    # =====================================================
+    # HOLDERS
+    # =====================================================
+
+    message += "👥 HOLDER INTELLIGENCE\n\n"
+
+    if holder_data:
+
+        message += (
+            f"Token accounts analisadas: "
+            f"{holder_data['accounts_analyzed']}\n"
+        )
+
+        message += (
+            f"Top 10 bruto: "
+            f"{holder_data['raw_top_10']:.2f}%\n"
+        )
+
+        message += (
+            f"Concentração bruta: "
+            f"{holder_data['raw_status']}\n\n"
+        )
+
+        message += (
+            f"Owners reais identificados: "
+            f"{holder_data['real_owners']}\n"
+        )
+
+        message += (
+            f"Concentração real: "
+            f"{holder_data['real_concentration']:.2f}%\n"
+        )
+
+        message += (
+            f"Status real: "
+            f"{holder_data['real_status']}\n\n"
+        )
+
+        message += "💧 POOL IDENTIFICADA\n\n"
+
+        message += (
+            f"Pool: {pair_address}\n"
+        )
+
+        message += (
+            f"Tokens na pool: "
+            f"{holder_data['pool_percentage']:.2f}%\n\n"
+        )
+
+        message += "👛 PRINCIPAIS HOLDERS REAIS\n\n"
+
+        for index, (wallet, percentage) in enumerate(
+            holder_data["top_holders"],
+            start=1
+        ):
+
+            message += (
+                f"{index}. {wallet}\n"
+                f"   {percentage:.2f}%\n"
+            )
+
+        message += "\n"
+
+    else:
+
+        message += (
+            "⚪ Não foi possível analisar os holders.\n\n"
+        )
+
+    # =====================================================
+    # LIQUIDEZ
+    # =====================================================
+
+    message += "💧 LIQUIDEZ\n"
+
+    message += (
+        f"Liquidez: ${liquidity:,.0f}\n"
+    )
+
+    message += (
+        f"Market Cap: ${market_cap:,.0f}\n"
+    )
+
+    message += (
+        f"Volume 24h: ${volume_24h:,.0f}\n"
+    )
+
+    message += (
+        f"Variação 24h: {price_change:.2f}%\n\n"
+    )
+
+    message += (
+        f"Liquidez: {liquidity_status}\n"
+    )
+
+    message += f"DEX: {dex}\n"
+    message += f"Pool: {pair_address}\n\n"
+
+    # =====================================================
+    # DEV WALLET 3.0
+    # =====================================================
+
+    message += "🧠 DEV WALLET INTELLIGENCE 3.0\n\n"
+
+    message += (
+        f"🔎 Transações do mint analisadas: "
+        f"{deployer_data['transactions_scanned']}\n"
+    )
+
+    if deployer_data["initialization_found"]:
+
+        message += (
+            "🟢 Inicialização do mint encontrada.\n\n"
+        )
+
+        if strong_candidates:
+
+            message += "🟢 CANDIDATO(S) COM FORTE EVIDÊNCIA\n\n"
+
+        elif medium_candidates:
+
+            message += "🟡 CANDIDATO(S) POSSÍVEIS\n\n"
+
+        else:
+
+            message += (
+                "⚪ Inicialização encontrada, "
+                "mas sem candidato forte.\n\n"
+            )
+
+        for index, candidate in enumerate(
+            candidates[:5],
+            start=1
+        ):
+
+            message += (
+                f"{index}️⃣ {candidate['wallet']}\n"
+            )
+
+            message += (
+                f"Score: {candidate['score']}/100\n"
+            )
+
+            message += (
+                f"{candidate['status']}\n"
+            )
+
+            if candidate["reasons"]:
+
+                message += "Evidências:\n"
+
+                for reason in candidate["reasons"]:
+
+                    if reason == "Mint authority":
+                        message += "✅ Mint authority\n"
+
+                    elif reason == "Freeze authority":
+                        message += "⚠️ Freeze authority\n"
+
+                    elif reason == "Fee payer":
+                        message += "✅ Fee payer\n"
+
+                    elif reason == "Signer":
+                        message += "✅ Signer\n"
+
+                    elif reason == "Participou da inicialização":
+                        message += (
+                            "✅ Participou da inicialização\n"
+                        )
+
+            if candidate["initialize_mint_count"] > 0:
+
+                message += (
+                    f"initializeMint: "
+                    f"{candidate['initialize_mint_count']}x\n"
+                )
+
+            if candidate["initialize_mint2_count"] > 0:
+
+                message += (
+                    f"initializeMint2: "
+                    f"{candidate['initialize_mint2_count']}x\n"
+                )
+
+            if candidate["programs"]:
+
+                message += (
+                    "Programas: "
+                    + ", ".join(candidate["programs"])
+                    + "\n"
+                )
+
+            if candidate["first_initialization"]:
+
+                message += (
+                    "Primeira inicialização: "
+                    + format_timestamp(
+                        candidate["first_initialization"]
+                    )
+                    + "\n"
+                )
+
+            message += "\n"
+
+    else:
+
+        message += (
+            "⚪ INITIALIZE MINT NÃO ENCONTRADO\n\n"
+        )
+
+        message += (
+            "Nenhuma transação analisada apresentou "
+            "evidência direta de initializeMint/"
+            "initializeMint2.\n\n"
+        )
+
+        if candidates:
+
+            message += (
+                "⚠️ Algumas wallets apareceram "
+                "nas transações do token, mas isso "
+                "não é suficiente para chamá-las de deployer.\n\n"
+            )
+
+            for index, candidate in enumerate(
+                candidates[:3],
+                start=1
+            ):
+
+                message += (
+                    f"{index}️⃣ {candidate['wallet']}\n"
+                )
+
+                message += (
+                    f"Score: {candidate['score']}/100\n"
+                )
+
+                message += (
+                    f"{candidate['status']}\n\n"
+                )
+
+        else:
+
+            message += (
+                "⚪ DEPLOYER NÃO IDENTIFICADO\n\n"
+            )
+
+    message += (
+        "⚠️ IMPORTANTE\n"
+        "A análise identifica candidatos com base "
+        "em evidências on-chain. Isso não prova "
+        "a identidade real do desenvolvedor.\n\n"
+    )
+
+    # =====================================================
+    # ANÁLISE INDIVIDUAL DO MELHOR CANDIDATO
+    # =====================================================
+
+    if candidates:
+
+        best = candidates[0]
+
+        # Só fazemos análise comportamental se houver
+        # alguma evidência mínima.
+        if best["score"] >= 40:
+
+            wallet = best["wallet"]
+
+            wallet_balance = get_wallet_token_balance(
+                wallet,
+                token_address
+            )
+
+            token_movements = analyze_dev_token_movements(
+                wallet,
+                token_address,
+                limit=30
+            )
+
+            funders = analyze_possible_funders(
+                wallet,
+                limit=30
+            )
+
+            behavior = classify_dev_behavior(
+                wallet_balance,
+                token_movements,
+                funders
+            )
+
+            message += "👛 ANÁLISE COMPORTAMENTAL\n\n"
+
+            message += (
+                f"Wallet analisada:\n{wallet}\n\n"
+            )
+
+            message += (
+                "💰 TOKEN ATUALMENTE NA WALLET\n"
+            )
+
+            message += (
+                f"{wallet_balance['balance']:.6f}\n"
+            )
+
+            message += (
+                f"Contas do token: "
+                f"{wallet_balance['accounts']}\n\n"
+            )
+
+            message += "🔄 MOVIMENTAÇÃO DO TOKEN\n"
+
+            message += (
+                f"Entradas observadas: "
+                f"{token_movements['in']:.6f}\n"
+            )
+
+            message += (
+                f"Saídas observadas: "
+                f"{token_movements['out']:.6f}\n\n"
+            )
+
+            message += "💸 POSSÍVEIS FONTES DE FINANCIAMENTO\n"
+
+            if funders:
+
+                sorted_funders = sorted(
+                    funders.items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                )
+
+                for funder, amount in sorted_funders[:5]:
+
+                    message += (
+                        f"• {funder}: "
+                        f"{amount:.4f} SOL\n"
+                    )
+
+            else:
+
+                message += (
+                    "Nenhuma fonte de financiamento "
+                    "clara identificada.\n"
+                )
+
+            message += "\n"
+
+            message += "🧭 COMPORTAMENTO\n"
+
+            message += (
+                f"{behavior['status']}\n"
+            )
+
+            message += (
+                f"Índice interno: "
+                f"{behavior['score']}/100\n"
+            )
+
+            if behavior["reasons"]:
+
+                message += "\n"
+
+                for reason in behavior["reasons"]:
+
+                    message += (
+                        f"• {reason}\n"
+                    )
+
+            message += "\n"
+
+    # =====================================================
+    # PRÓXIMAS ETAPAS
+    # =====================================================
+
+    message += "📊 PRÓXIMAS ANÁLISES\n\n"
+
+    message += "• Histórico on-chain completo\n"
+    message += "• Relação entre wallets\n"
+    message += "• Funding em cadeia\n"
+    message += "• Comportamento da liquidez\n"
+    message += "• Distribuição coordenada\n"
+    message += "• Risco de rug pull\n\n"
+
+    message += (
+        "⚠️ Ainda não é um Security Score."
+    )
 
     await update.message.reply_text(
-        "🤖 MEME RADAR AI\n\n"
-        "Bot online e conectado à Solana.\n\n"
-        "Comandos disponíveis:\n\n"
-        "/top - Melhores oportunidades de mercado\n"
-        "/security ENDERECO - Análise de segurança\n"
-        "/help - Ajuda"
+        message
     )
 
 
 # =========================================================
-# COMANDO HELP
+# TOP MARKET
 # =========================================================
 
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+def calculate_market_score(pair):
 
-    await update.message.reply_text(
-        "🤖 MEME RADAR AI\n\n"
-
-        "📊 /top\n"
-        "Mostra os tokens com melhor atividade "
-        "de mercado.\n\n"
-
-        "🛡️ /security ENDERECO\n"
-        "Analisa segurança, autoridades, holders, "
-        "liquidez e carteira candidata do deployer.\n\n"
-
-        "Exemplo:\n"
-        "/security ENDERECO_DO_TOKEN\n\n"
-
-        "⚠️ As análises são informativas e não "
-        "garantem lucro."
+    liquidity = float(
+        (pair.get("liquidity") or {}).get("usd") or 0
     )
 
-
-# =========================================================
-# COMANDO TOP
-# =========================================================
-
-async def top(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await update.message.reply_text(
-        "📡 MEME RADAR AI\n\n"
-        "🔎 Procurando oportunidades na Solana...\n"
-        "⏳ Aguarde..."
+    volume = float(
+        (pair.get("volume") or {}).get("h24") or 0
     )
+
+    movement = float(
+        (pair.get("priceChange") or {}).get("h24") or 0
+    )
+
+    # Liquidez
+    liquidity_score = min(
+        liquidity / 50000 * 30,
+        30
+    )
+
+    # Volume
+    volume_score = min(
+        volume / 500000 * 30,
+        30
+    )
+
+    # Movimento
+    if movement >= 50:
+        movement_score = 5
+
+    else:
+        movement_score = min(
+            max(movement, 0) / 20 * 20,
+            20
+        )
+
+    # Relação volume/liquidez
+    if liquidity > 0:
+        ratio = volume / liquidity
+
+        ratio_score = min(
+            ratio / 10 * 20,
+            20
+        )
+
+    else:
+        ratio_score = 0
+
+    score = (
+        liquidity_score
+        + volume_score
+        + movement_score
+        + ratio_score
+    )
+
+    return round(score)
+
+
+async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
-        profiles_url = (
+        profile_url = (
             "https://api.dexscreener.com/"
             "token-profiles/latest/v1"
         )
 
         response = requests.get(
-            profiles_url,
+            profile_url,
             timeout=20
         )
 
@@ -1618,115 +1893,84 @@ async def top(
 
         profiles = response.json()
 
-        candidates = []
+        solana_tokens = []
 
         for profile in profiles:
 
-            if profile.get(
-                "chainId"
-            ) != "solana":
-
+            if profile.get("chainId") != "solana":
                 continue
 
-            token_address = profile.get(
-                "tokenAddress"
-            )
+            address = profile.get("tokenAddress")
 
-            if not token_address:
+            if not address:
                 continue
+
+            solana_tokens.append(address)
+
+        candidates = []
+
+        for address in solana_tokens[:30]:
 
             try:
 
-                token_url = (
+                url = (
                     "https://api.dexscreener.com/"
-                    "latest/dex/tokens/"
-                    f"{token_address}"
+                    f"latest/dex/tokens/{address}"
                 )
 
-                token_response = requests.get(
-                    token_url,
+                response = requests.get(
+                    url,
                     timeout=15
                 )
 
-                token_response.raise_for_status()
+                if response.status_code != 200:
+                    continue
 
-                token_data = (
-                    token_response.json()
-                )
+                data = response.json()
 
-                pairs = token_data.get(
-                    "pairs",
-                    []
-                )
+                pairs = data.get("pairs") or []
 
                 solana_pairs = [
                     pair
                     for pair in pairs
-                    if pair.get(
-                        "chainId"
-                    ) == "solana"
+                    if pair.get("chainId") == "solana"
                 ]
 
                 if not solana_pairs:
                     continue
 
-                best_pair = max(
-                    solana_pairs,
-                    key=lambda pair: (
-                        pair.get(
-                            "liquidity",
-                            {}
-                        ).get("usd") or 0
-                    )
+                solana_pairs.sort(
+                    key=lambda x: float(
+                        (x.get("liquidity") or {}).get("usd") or 0
+                    ),
+                    reverse=True
                 )
 
-                base_token = best_pair.get(
-                    "baseToken",
-                    {}
-                )
+                pair = solana_pairs[0]
 
-                symbol = base_token.get(
-                    "symbol",
-                    "N/D"
-                )
+                base_token = pair.get("baseToken") or {}
 
-                name = base_token.get(
-                    "name",
-                    "Token"
-                )
+                symbol = base_token.get("symbol") or "N/D"
+                name = base_token.get("name") or "N/D"
 
-                if symbol.upper() in [
-                    "SOL",
-                    "WSOL"
-                ]:
-
+                if symbol in ["SOL", "WSOL"]:
                     continue
 
-                liquidity = (
-                    best_pair
-                    .get("liquidity", {})
-                    .get("usd") or 0
+                liquidity = float(
+                    (pair.get("liquidity") or {}).get("usd") or 0
                 )
 
-                volume = (
-                    best_pair
-                    .get("volume", {})
-                    .get("h24") or 0
+                volume = float(
+                    (pair.get("volume") or {}).get("h24") or 0
                 )
 
-                price_change = (
-                    best_pair
-                    .get("priceChange", {})
-                    .get("h24") or 0
+                movement = float(
+                    (pair.get("priceChange") or {}).get("h24") or 0
                 )
 
-                market_cap = (
-                    best_pair.get(
-                        "marketCap"
-                    )
-                    or best_pair.get(
-                        "fdv"
-                    )
+                market_cap = float(
+                    pair.get("marketCap")
+                    or pair.get("fdv")
                     or 0
                 )
 
@@ -1736,1022 +1980,156 @@ async def top(
                 if volume < 10000:
                     continue
 
-                liquidity_score = min(
-                    liquidity / 50000 * 30,
-                    30
-                )
-
-                volume_score = min(
-                    volume / 500000 * 30,
-                    30
-                )
-
-                if price_change >= 50:
-
-                    movement_score = 5
-
-                elif price_change > 0:
-
-                    movement_score = min(
-                        price_change / 10,
-                        20
-                    )
-
-                else:
-
-                    movement_score = 0
-
-                volume_liquidity_ratio = (
-                    volume / liquidity
-                    if liquidity > 0
-                    else 0
-                )
-
-                ratio_score = min(
-                    volume_liquidity_ratio / 10 * 20,
-                    20
-                )
-
-                score = (
-                    liquidity_score
-                    + volume_score
-                    + movement_score
-                    + ratio_score
-                )
+                score = calculate_market_score(pair)
 
                 candidates.append({
                     "name": name,
                     "symbol": symbol,
-                    "address": token_address,
+                    "address": address,
                     "liquidity": liquidity,
                     "volume": volume,
-                    "price_change": price_change,
+                    "movement": movement,
                     "market_cap": market_cap,
                     "score": score
                 })
 
-            except Exception as token_error:
-
-                print(
-                    "ERRO TOKEN TOP:",
-                    repr(token_error)
-                )
-
+            except Exception:
                 continue
 
-            if len(candidates) >= 30:
-                break
-
         candidates.sort(
-            key=lambda item: item["score"],
+            key=lambda x: x["score"],
             reverse=True
         )
 
-        top_tokens = candidates[:5]
+        candidates = candidates[:5]
 
-        if not top_tokens:
+        if not candidates:
 
             await update.message.reply_text(
-                "❌ Não encontrei tokens suficientes "
-                "com os filtros atuais."
+                "⚪ Nenhum token encontrado no momento."
             )
 
             return
 
-        message = (
-            "🔥 MEME RADAR AI — TOP 5\n\n"
-
-            "Ranking baseado em dados de mercado.\n"
-            "Ainda não considera segurança, "
-            "carteiras, comunidade ou notícias.\n\n"
-        )
+        message = "📊 MARKET ENGINE — TOP 5\n\n"
 
         for index, token in enumerate(
-            top_tokens,
+            candidates,
             start=1
         ):
 
             message += (
-                f"{index}️⃣ {token['name']} "
+                f"{index}. {token['name']} "
                 f"({token['symbol']})\n"
+            )
 
-                f"📊 Score mercado: "
-                f"{token['score']:.0f}/100\n"
+            message += (
+                f"Score: {token['score']}/100\n"
+            )
 
-                f"💧 Liquidez: "
+            message += (
+                f"Liquidez: "
                 f"${token['liquidity']:,.0f}\n"
+            )
 
-                f"📈 Volume 24h: "
+            message += (
+                f"Volume 24h: "
                 f"${token['volume']:,.0f}\n"
+            )
 
-                f"🚀 Movimento: "
-                f"{token['price_change']:.2f}%\n"
+            message += (
+                f"Movimento: "
+                f"{token['movement']:.2f}%\n"
+            )
 
-                f"💰 MC: "
+            message += (
+                f"Market Cap: "
                 f"${token['market_cap']:,.0f}\n"
+            )
 
-                f"🪙 `{token['address']}`\n\n"
+            message += (
+                f"Token:\n"
+                f"{token['address']}\n\n"
             )
 
         message += (
-            "⚠️ IMPORTANTE\n"
-
-            "Esse ranking NÃO é sinal de compra.\n"
-
-            "Um token pode ter volume alto e ainda "
-            "ser extremamente arriscado.\n\n"
-
-            "Próxima etapa: Security + Wallet "
-            "Intelligence."
+            "⚠️ O Market Engine avalia apenas "
+            "dados de mercado.\n"
+            "Ainda não considera segurança, "
+            "wallets, comunidade ou notícias."
         )
 
         await update.message.reply_text(
-            message,
-            parse_mode="Markdown"
+            message
         )
 
-    except Exception as error:
+    except Exception as e:
 
-        print(
-            "ERRO TOP:",
-            repr(error)
-        )
+        print("TOP ERROR:", e)
 
         await update.message.reply_text(
-            "❌ Erro no Market Engine.\n\n"
-            f"Detalhes: {error}"
+            "❌ Erro ao consultar o Market Engine."
         )
 
 
 # =========================================================
-# COMANDO SECURITY
+# START
 # =========================================================
 
-async def security(
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    message = (
+        "🤖 MEME RADAR AI\n\n"
+        "Bot de análise de tokens Solana.\n\n"
+        "Comandos disponíveis:\n\n"
+        "/top\n"
+        "→ Ranking de oportunidades de mercado\n\n"
+        "/security TOKEN\n"
+        "→ Análise de segurança e wallets\n\n"
+        "/help\n"
+        "→ Ajuda"
+    )
+
+    await update.message.reply_text(
+        message
+    )
+
+
+# =========================================================
+# HELP
+# =========================================================
+
+async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if not context.args:
-
-        await update.message.reply_text(
-            "🛡️ Você precisa colocar o endereço "
-            "do token.\n\n"
-
-            "Exemplo:\n"
-            "/security ENDERECO_DO_TOKEN"
-        )
-
-        return
-
-    token_address = context.args[0]
-
-    await update.message.reply_text(
-        "🛡️ SECURITY ENGINE\n\n"
-        "🔎 Consultando a blockchain Solana...\n"
-        "🧠 Investigando a wallet candidata...\n"
-        "⏳ Aguarde..."
+    message = (
+        "📚 MEME RADAR AI\n\n"
+        "/top\n"
+        "Mostra os tokens com maior atividade "
+        "de mercado.\n\n"
+        "/security TOKEN_ADDRESS\n"
+        "Analisa:\n"
+        "• Mint authority\n"
+        "• Freeze authority\n"
+        "• Holder concentration\n"
+        "• Liquidez\n"
+        "• Pool\n"
+        "• Deployer candidates\n"
+        "• Histórico da wallet\n"
+        "• Movimentação do token\n"
+        "• Possíveis funders\n\n"
+        "⚠️ O bot não garante valorização."
     )
 
-    try:
-
-        # =====================================================
-        # 1. DADOS DO MINT
-        # =====================================================
-
-        result = solana_rpc(
-            "getAccountInfo",
-            [
-                token_address,
-                {
-                    "encoding": "jsonParsed",
-                    "commitment": "confirmed"
-                }
-            ]
-        )
-
-        account = (
-            result.get("value")
-            if result
-            else None
-        )
-
-        if not account:
-
-            await update.message.reply_text(
-                "❌ Não encontrei esse endereço "
-                "na blockchain Solana."
-            )
-
-            return
-
-        data = account.get(
-            "data",
-            {}
-        )
-
-        parsed = data.get(
-            "parsed",
-            {}
-        )
-
-        info = parsed.get(
-            "info",
-            {}
-        )
-
-        mint_authority = info.get(
-            "mintAuthority"
-        )
-
-        freeze_authority = info.get(
-            "freezeAuthority"
-        )
-
-        supply = info.get(
-            "supply",
-            "0"
-        )
-
-        decimals = info.get(
-            "decimals",
-            0
-        )
-
-        owner_program = account.get(
-            "owner",
-            "N/D"
-        )
-
-        if mint_authority:
-
-            mint_status = "⚠️ ATIVA"
-
-        else:
-
-            mint_status = "✅ REVOGADA"
-
-        if freeze_authority:
-
-            freeze_status = "⚠️ ATIVA"
-
-        else:
-
-            freeze_status = "✅ REVOGADA"
-
-        # =====================================================
-        # 2. LIQUIDEZ
-        # =====================================================
-
-        liquidity_data = get_liquidity_data(
-            token_address
-        )
-
-        liquidity = 0
-        market_cap = 0
-        volume_24h = 0
-        price_change = 0
-        dex_id = "N/D"
-        pair_address = "N/D"
-
-        if liquidity_data:
-
-            liquidity = (
-                liquidity_data["liquidity"]
-            )
-
-            market_cap = (
-                liquidity_data["market_cap"]
-            )
-
-            volume_24h = (
-                liquidity_data["volume_24h"]
-            )
-
-            price_change = (
-                liquidity_data["price_change_24h"]
-            )
-
-            dex_id = (
-                liquidity_data["dex_id"]
-            )
-
-            pair_address = (
-                liquidity_data["pair_address"]
-            )
-
-        # =====================================================
-        # 3. MAIORES CONTAS
-        # =====================================================
-
-        largest_result = solana_rpc(
-            "getTokenLargestAccounts",
-            [
-                token_address,
-                {
-                    "commitment": "confirmed"
-                }
-            ]
-        )
-
-        largest_accounts = []
-
-        if largest_result:
-
-            largest_accounts = (
-                largest_result.get(
-                    "value",
-                    []
-                )
-            )
-
-        # =====================================================
-        # 4. HOLDER INTELLIGENCE
-        # =====================================================
-
-        try:
-
-            supply_number = int(
-                supply
-            )
-
-        except Exception:
-
-            supply_number = 0
-
-        top_10_percentage = 0
-
-        holder_wallets = {}
-        liquidity_wallets = {}
-
-        if supply_number > 0:
-
-            for holder in largest_accounts[:10]:
-
-                token_account = holder.get(
-                    "address"
-                )
-
-                amount = int(
-                    holder.get(
-                        "amount",
-                        0
-                    )
-                )
-
-                percentage = (
-                    amount / supply_number
-                ) * 100
-
-                top_10_percentage += percentage
-
-                owner = None
-
-                try:
-
-                    owner = (
-                        get_token_account_owner(
-                            token_account
-                        )
-                    )
-
-                except Exception as owner_error:
-
-                    print(
-                        "ERRO OWNER:",
-                        repr(owner_error)
-                    )
-
-                if not owner:
-                    continue
-
-                if is_liquidity_pool_wallet(
-                    owner,
-                    pair_address
-                ):
-
-                    liquidity_wallets[
-                        owner
-                    ] = (
-                        liquidity_wallets.get(
-                            owner,
-                            0
-                        )
-                        + percentage
-                    )
-
-                else:
-
-                    holder_wallets[
-                        owner
-                    ] = (
-                        holder_wallets.get(
-                            owner,
-                            0
-                        )
-                        + percentage
-                    )
-
-        pool_percentage = sum(
-            liquidity_wallets.values()
-        )
-
-        real_holder_percentage = sum(
-            holder_wallets.values()
-        )
-
-        unique_wallets = len(
-            holder_wallets
-        )
-
-        sorted_wallets = sorted(
-            holder_wallets.items(),
-            key=lambda item: item[1],
-            reverse=True
-        )
-
-        top_wallets_message = ""
-
-        if sorted_wallets:
-
-            for index, wallet in enumerate(
-                sorted_wallets[:5],
-                start=1
-            ):
-
-                top_wallets_message += (
-                    f"{index}. "
-                    f"`{wallet[0]}`\n"
-                    f"   {wallet[1]:.2f}%\n"
-                )
-
-        else:
-
-            top_wallets_message = (
-                "Não foi possível identificar "
-                "holders reais."
-            )
-
-        if liquidity_wallets:
-
-            pool_message = (
-                "💧 POOL IDENTIFICADA\n\n"
-            )
-
-            for pool, percentage in (
-                liquidity_wallets.items()
-            ):
-
-                pool_message += (
-                    f"Pool: `{pool}`\n"
-                    f"Tokens na pool: "
-                    f"{percentage:.2f}%\n\n"
-                )
-
-        else:
-
-            pool_message = (
-                "💧 POOL IDENTIFICADA\n\n"
-                "Não foi possível confirmar a pool "
-                "entre as maiores contas analisadas.\n\n"
-            )
-
-        if top_10_percentage >= 70:
-
-            raw_concentration_status = (
-                "🔴 MUITO ALTA"
-            )
-
-        elif top_10_percentage >= 50:
-
-            raw_concentration_status = (
-                "🟠 ALTA"
-            )
-
-        elif top_10_percentage >= 30:
-
-            raw_concentration_status = (
-                "🟡 MODERADA"
-            )
-
-        else:
-
-            raw_concentration_status = (
-                "🟢 BAIXA"
-            )
-
-        if real_holder_percentage >= 70:
-
-            real_concentration_status = (
-                "🔴 MUITO ALTA"
-            )
-
-        elif real_holder_percentage >= 50:
-
-            real_concentration_status = (
-                "🟠 ALTA"
-            )
-
-        elif real_holder_percentage >= 30:
-
-            real_concentration_status = (
-                "🟡 MODERADA"
-            )
-
-        else:
-
-            real_concentration_status = (
-                "🟢 BAIXA"
-            )
-
-        # =====================================================
-        # 5. LIQUIDEZ STATUS
-        # =====================================================
-
-        if liquidity >= 50000:
-
-            liquidity_status = "🟢 BOA"
-
-        elif liquidity >= 15000:
-
-            liquidity_status = "🟡 MODERADA"
-
-        elif liquidity >= 5000:
-
-            liquidity_status = "🟠 BAIXA"
-
-        else:
-
-            liquidity_status = "🔴 MUITO BAIXA"
-
-        # =====================================================
-        # 6. DEV WALLET 2.0
-        # =====================================================
-
-        dev_data = {
-            "wallet": None,
-            "signature": None,
-            "block_time": None,
-            "signers": [],
-            "fee_payer": None,
-            "mint_initialized": False,
-            "mint_authority": None,
-            "freeze_authority": None,
-            "confidence": "BAIXA",
-            "confidence_score": 0,
-            "evidence": [],
-            "reason": "Não analisado."
-        }
-
-        dev_activity = {
-            "total": 0,
-            "successful": 0,
-            "failed": 0,
-            "first_seen": None,
-            "last_seen": None
-        }
-
-        dev_balance = {
-            "amount": 0,
-            "percentage": 0,
-            "accounts": 0
-        }
-
-        dev_movements = {
-            "transactions": 0,
-            "incoming": 0,
-            "outgoing": 0,
-            "counterparties": {},
-            "transfer_signatures": []
-        }
-
-        dev_funders = {}
-
-        try:
-
-            dev_data = identify_deployer(
-                token_address
-            )
-
-            dev_wallet = dev_data.get(
-                "wallet"
-            )
-
-            if dev_wallet:
-
-                dev_activity = (
-                    get_wallet_activity(
-                        dev_wallet,
-                        limit=30
-                    )
-                )
-
-                dev_balance = (
-                    get_wallet_token_balance(
-                        dev_wallet,
-                        token_address,
-                        supply
-                    )
-                )
-
-                dev_movements = (
-                    analyze_dev_token_movements(
-                        dev_wallet,
-                        token_address,
-                        limit=30
-                    )
-                )
-
-                dev_funders = (
-                    analyze_possible_funders(
-                        dev_wallet,
-                        limit=20
-                    )
-                )
-
-        except Exception as dev_error:
-
-            print(
-                "ERRO DEV INTELLIGENCE 2.0:",
-                repr(dev_error)
-            )
-
-        dev_behavior = classify_dev_behavior(
-            dev_data,
-            dev_balance,
-            dev_movements,
-            dev_funders
-        )
-
-        # =====================================================
-        # 7. MENSAGEM DA DEV WALLET
-        # =====================================================
-
-        if dev_data.get("wallet"):
-
-            dev_wallet = dev_data[
-                "wallet"
-            ]
-
-            dev_signature = dev_data.get(
-                "signature"
-            )
-
-            dev_block_time = dev_data.get(
-                "block_time"
-            )
-
-            dev_confidence = dev_data.get(
-                "confidence",
-                "BAIXA"
-            )
-
-            confidence_score = dev_data.get(
-                "confidence_score",
-                0
-            )
-
-            signers = dev_data.get(
-                "signers",
-                []
-            )
-
-            fee_payer = dev_data.get(
-                "fee_payer"
-            )
-
-            evidence = dev_data.get(
-                "evidence",
-                []
-            )
-
-            if evidence:
-
-                evidence_message = "\n".join(
-                    f"✅ {item}"
-                    for item in evidence
-                )
-
-            else:
-
-                evidence_message = (
-                    "⚪ Nenhuma evidência adicional "
-                    "forte encontrada."
-                )
-
-            if dev_balance["percentage"] > 0:
-
-                balance_message = (
-                    f"{dev_balance['percentage']:.4f}% "
-                    "do supply"
-                )
-
-            else:
-
-                balance_message = (
-                    "0% do supply atualmente identificado"
-                )
-
-            movement_incoming = (
-                dev_movements["incoming"]
-            )
-
-            movement_outgoing = (
-                dev_movements["outgoing"]
-            )
-
-            if supply_number > 0:
-
-                incoming_percentage = (
-                    movement_incoming
-                    / supply_number
-                ) * 100
-
-                outgoing_percentage = (
-                    movement_outgoing
-                    / supply_number
-                ) * 100
-
-            else:
-
-                incoming_percentage = 0
-                outgoing_percentage = 0
-
-            counterparties = sorted(
-                dev_movements[
-                    "counterparties"
-                ].items(),
-                key=lambda item: item[1],
-                reverse=True
-            )
-
-            counterparties_message = ""
-
-            if counterparties:
-
-                for index, item in enumerate(
-                    counterparties[:5],
-                    start=1
-                ):
-
-                    wallet = item[0]
-                    amount = item[1]
-
-                    if supply_number > 0:
-
-                        percentage = (
-                            amount
-                            / supply_number
-                        ) * 100
-
-                    else:
-
-                        percentage = 0
-
-                    counterparties_message += (
-                        f"{index}. `{wallet}`\n"
-                        f"   {percentage:.4f}% do supply\n"
-                    )
-
-            else:
-
-                counterparties_message = (
-                    "Nenhuma contraparte de token "
-                    "identificada."
-                )
-
-            funders_sorted = sorted(
-                dev_funders.items(),
-                key=lambda item: item[1],
-                reverse=True
-            )
-
-            funders_message = ""
-
-            if funders_sorted:
-
-                for index, item in enumerate(
-                    funders_sorted[:3],
-                    start=1
-                ):
-
-                    wallet = item[0]
-                    lamports = item[1]
-
-                    sol = (
-                        lamports / 1_000_000_000
-                    )
-
-                    funders_message += (
-                        f"{index}. `{wallet}`\n"
-                        f"   ~{sol:.4f} SOL "
-                        "em entradas líquidas observadas\n"
-                    )
-
-            else:
-
-                funders_message = (
-                    "Nenhuma fonte de financiamento "
-                    "clara identificada no histórico "
-                    "consultado."
-                )
-
-            dev_message = (
-                "🧠 DEV WALLET INTELLIGENCE 2.0\n\n"
-
-                "🟡 CANDIDATO A DEPLOYER\n\n"
-
-                f"Wallet:\n"
-                f"`{dev_wallet}`\n\n"
-
-                f"Confiança: "
-                f"{dev_confidence} "
-                f"({confidence_score}/100)\n\n"
-
-                "🔎 EVIDÊNCIAS\n"
-                f"{evidence_message}\n\n"
-
-                "💳 FEE PAYER\n"
-                f"`{fee_payer or 'N/D'}`\n\n"
-
-                "🪙 INICIALIZAÇÃO DO MINT\n"
-                f"{'✅ DETECTADA' if dev_data.get('mint_initialized') else '⚪ NÃO CONFIRMADA'}\n\n"
-
-                "📜 HISTÓRICO\n"
-                f"Transações analisadas: "
-                f"{dev_activity['total']}\n"
-                f"Sucesso: "
-                f"{dev_activity['successful']}\n"
-                f"Falhas: "
-                f"{dev_activity['failed']}\n\n"
-
-                f"Primeira atividade observada:\n"
-                f"{format_timestamp(dev_activity['first_seen'])}\n\n"
-
-                f"Última atividade observada:\n"
-                f"{format_timestamp(dev_activity['last_seen'])}\n\n"
-
-                "💰 TOKEN ATUALMENTE NA WALLET\n"
-                f"{balance_message}\n"
-                f"Contas do token: "
-                f"{dev_balance['accounts']}\n\n"
-
-                "🔄 MOVIMENTAÇÃO DO TOKEN\n"
-                f"Entradas observadas: "
-                f"{incoming_percentage:.4f}% do supply\n"
-                f"Saídas observadas: "
-                f"{outgoing_percentage:.4f}% do supply\n\n"
-
-                "👥 PRINCIPAIS CONTRAPARTES\n"
-                f"{counterparties_message}\n"
-
-                "💸 POSSÍVEIS FONTES DE FINANCIAMENTO\n"
-                f"{funders_message}\n"
-
-                "🧭 COMPORTAMENTO\n"
-                f"{dev_behavior['status']}\n"
-                f"Índice interno: "
-                f"{dev_behavior['score']}/100\n\n"
-            )
-
-            if dev_behavior["reasons"]:
-
-                dev_message += (
-                    "Sinais encontrados:\n"
-                    + "\n".join(
-                        f"• {reason}"
-                        for reason in dev_behavior[
-                            "reasons"
-                        ]
-                    )
-                    + "\n\n"
-                )
-
-            dev_message += (
-                "⚠️ Essa wallet continua sendo "
-                "tratada como candidata.\n"
-                "As evidências não provam a identidade "
-                "real do desenvolvedor."
-            )
-
-        else:
-
-            dev_message = (
-                "🧠 DEV WALLET INTELLIGENCE 2.0\n\n"
-
-                "⚪ NÃO IDENTIFICADA\n\n"
-
-                "Não foi possível identificar "
-                "um candidato confiável a deployer "
-                "com os dados RPC consultados."
-            )
-
-        # =====================================================
-        # 8. RESPOSTA FINAL
-        # =====================================================
-
-        message = (
-            "🛡️ SECURITY ENGINE\n\n"
-
-            f"🪙 Token:\n"
-            f"`{token_address}`\n\n"
-
-            "🔐 MINT AUTHORITY\n"
-            f"{mint_status}\n\n"
-
-            "🧊 FREEZE AUTHORITY\n"
-            f"{freeze_status}\n\n"
-
-            "🪙 SUPPLY\n"
-            f"{supply}\n\n"
-
-            "🔢 DECIMAIS\n"
-            f"{decimals}\n\n"
-
-            "⚙️ TOKEN PROGRAM\n"
-            f"`{owner_program}`\n\n"
-
-            "👥 HOLDER INTELLIGENCE\n\n"
-
-            f"Token accounts analisadas: "
-            f"{len(largest_accounts)}\n"
-
-            f"Top 10 bruto: "
-            f"{top_10_percentage:.2f}%\n"
-
-            f"Concentração bruta: "
-            f"{raw_concentration_status}\n\n"
-
-            f"Owners reais identificados: "
-            f"{unique_wallets}\n"
-
-            f"Concentração real: "
-            f"{real_holder_percentage:.2f}%\n"
-
-            f"Status real: "
-            f"{real_concentration_status}\n\n"
-
-            f"{pool_message}"
-
-            "👛 PRINCIPAIS HOLDERS REAIS\n\n"
-
-            f"{top_wallets_message}\n"
-
-            "💧 LIQUIDEZ\n"
-
-            f"Liquidez: "
-            f"${liquidity:,.0f}\n"
-
-            f"Market Cap: "
-            f"${market_cap:,.0f}\n"
-
-            f"Volume 24h: "
-            f"${volume_24h:,.0f}\n"
-
-            f"Variação 24h: "
-            f"{price_change:.2f}%\n\n"
-
-            f"Liquidez: "
-            f"{liquidity_status}\n"
-
-            f"DEX: {dex_id}\n"
-
-            f"Pool: `{pair_address}`\n\n"
-
-            f"{dev_message}\n\n"
-
-            "📊 PRÓXIMAS ANÁLISES\n\n"
-
-            "• Histórico on-chain completo\n"
-            "• Relação entre wallets\n"
-            "• Funding em cadeia\n"
-            "• Comportamento da liquidez\n"
-            "• Distribuição coordenada\n"
-            "• Risco de rug pull\n\n"
-
-            "⚠️ Ainda não é um Security Score."
-        )
-
-        await update.message.reply_text(
-            message,
-            parse_mode="Markdown"
-        )
-
-    except Exception as error:
-
-        print(
-            "ERRO SECURITY:",
-            repr(error)
-        )
-
-        await update.message.reply_text(
-            "❌ Erro dentro do Security Engine.\n\n"
-            f"Detalhes: {error}"
-        )
+    await update.message.reply_text(
+        message
+    )
 
 
 # =========================================================
-# INICIALIZAÇÃO DO BOT
+# MAIN
 # =========================================================
 
 def main():
@@ -2759,7 +2137,7 @@ def main():
     application = (
         Application
         .builder()
-        .token(TOKEN)
+        .token(TELEGRAM_TOKEN)
         .build()
     )
 
@@ -2791,9 +2169,7 @@ def main():
         )
     )
 
-    print(
-        "🤖 Meme Radar AI iniciado."
-    )
+    print("🤖 Meme Radar AI iniciado.")
 
     application.run_polling()
 

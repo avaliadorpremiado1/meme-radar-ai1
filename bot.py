@@ -698,7 +698,7 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 top_10_percentage += percentage
 
         # ==========================================
-        # 6. CLASSIFICAÇÃO
+        # 6. CLASSIFICAÇÃO DOS HOLDERS
         # ==========================================
 
         if top_10_percentage >= 70:
@@ -718,7 +718,75 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
             concentration_status = "🟢 BAIXA"
 
         # ==========================================
-        # 7. MONTAR RESPOSTA
+        # 7. LIQUIDEZ
+        # ==========================================
+
+        liquidity_data = get_liquidity_data(
+            token_address
+        )
+
+        if liquidity_data:
+
+            liquidity = liquidity_data["liquidity"]
+
+            market_cap = liquidity_data["market_cap"]
+
+            volume_24h = liquidity_data["volume_24h"]
+
+            price_change_24h = (
+                liquidity_data["price_change_24h"]
+            )
+
+            liquidity_ratio = (
+                liquidity_data["liquidity_ratio"]
+            )
+
+            dex = liquidity_data["dex"]
+
+            pair_address = (
+                liquidity_data["pair_address"]
+            )
+
+            if liquidity >= 100000:
+
+                liquidity_status = "🟢 MUITO BOA"
+
+            elif liquidity >= 50000:
+
+                liquidity_status = "🟢 BOA"
+
+            elif liquidity >= 20000:
+
+                liquidity_status = "🟡 MODERADA"
+
+            else:
+
+                liquidity_status = "🔴 BAIXA"
+
+            liquidity_text = (
+                "💧 LIQUIDEZ\n"
+                f"Liquidez: ${liquidity:,.0f}\n"
+                f"Market Cap: ${market_cap:,.0f}\n"
+                f"Volume 24h: ${volume_24h:,.0f}\n"
+                f"Variação 24h: "
+                f"{price_change_24h:+.2f}%\n\n"
+                f"Liquidez/MC: "
+                f"{liquidity_ratio:.2f}%\n"
+                f"DEX: {dex}\n"
+                f"Pool: `{pair_address}`\n\n"
+                f"Situação: {liquidity_status}\n\n"
+            )
+
+        else:
+
+            liquidity_text = (
+                "💧 LIQUIDEZ\n"
+                "⚠️ Não foi possível encontrar "
+                "uma pool válida.\n\n"
+            )
+
+        # ==========================================
+        # 8. MONTAR RESPOSTA
         # ==========================================
 
         message = (
@@ -750,8 +818,9 @@ async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Concentração: "
             f"{concentration_status}\n\n"
 
+            f"{liquidity_text}"
+
             "📊 PRÓXIMA ANÁLISE\n"
-            "• Liquidez\n"
             "• Carteira do dev\n"
             "• Histórico on-chain\n"
             "• Relação entre carteiras\n"

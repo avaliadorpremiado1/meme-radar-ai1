@@ -642,9 +642,11 @@ def main():
     app.add_handler(
         CommandHandler("analyze", analyze)
     )
-app.add_handler(
-    CommandHandler("security", security)
-)
+
+    app.add_handler(
+        CommandHandler("security", security)
+    )
+
     app.add_handler(
         CommandHandler("help", help_command)
     )

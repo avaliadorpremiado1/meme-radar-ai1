@@ -110,6 +110,29 @@ def get_liquidity_data(token_address):
         "dex": dex,
         "pair_address": pair_address
     }
+    def get_token_accounts_owned_by(owner_address, token_address):
+    result = solana_rpc(
+        "getTokenAccountsByOwner",
+        [
+            owner_address,
+            {
+                "mint": token_address,
+                "encoding": "jsonParsed",
+                "commitment": "confirmed"
+            }
+        ]
+    )
+
+    if not result:
+        return []
+
+    accounts = result.get("value", [])
+
+    return [
+        account.get("pubkey")
+        for account in accounts
+        if account.get("pubkey")
+    ]
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 MEME RADAR AI\n\n"

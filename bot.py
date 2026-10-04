@@ -6,7 +6,32 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
+SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 
+
+def solana_rpc(method, params):
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params
+    }
+
+    response = requests.post(
+        SOLANA_RPC,
+        json=payload,
+        timeout=20
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if "error" in data:
+        raise Exception(data["error"])
+
+    return data.get("result")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -441,7 +466,147 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Vamos verificar os logs."
         )
 
+async def security(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    if not context.args:
+
+        await update.message.reply_text(
+            "🛡️ Você precisa colocar o endereço do token.\n\n"
+            "Exemplo:\n"
+            "/security ENDERECO_DO_TOKEN"
+        )
+
+        return
+
+    token_address = context.args[0]
+
+    await update.message.reply_text(
+        "🛡️ SECURITY ENGINE\n\n"
+        "🔎 Consultando a blockchain Solana...\n"
+        "⏳ Aguarde..."
+    )
+
+    try:
+
+        result = solana_rpc(
+            "getAccountInfo",
+            [
+                token_address,
+                {
+                    "encoding": "jsonParsed",
+                    "commitment": "confirmed"
+                }
+            ]
+        )
+
+        account = result.get("value")
+
+        if not account:
+
+            await update.message.reply_text(
+                "❌ Não encontrei esse endereço "
+                "na blockchain Solana."
+            )
+
+            return
+
+        data = account.get("data", {})
+
+        parsed = data.get("parsed", {})
+
+        info = parsed.get("info", {})
+
+        mint_authority = info.get(
+            "mintAuthority"
+        )
+
+        freeze_authority = info.get(
+            "freezeAuthority"
+        )
+
+        supply = info.get(
+            "supply",
+            "N/D"
+        )
+
+        decimals = info.get(
+            "decimals",
+            "N/D"
+        )
+
+        owner_program = account.get(
+            "owner",
+            "N/D"
+        )
+
+        if mint_authority:
+
+            mint_status = (
+                "⚠️ ATIVA\n"
+                f"`{mint_authority}`"
+            )
+
+        else:
+
+            mint_status = "✅ REVOGADA"
+
+        if freeze_authority:
+
+            freeze_status = (
+                "⚠️ ATIVA\n"
+                f"`{freeze_authority}`"
+            )
+
+        else:
+
+            freeze_status = "✅ REVOGADA"
+
+        message = (
+            "🛡️ SECURITY ENGINE\n\n"
+            f"🪙 Token:\n"
+            f"`{token_address}`\n\n"
+
+            "🔐 MINT AUTHORITY\n"
+            f"{mint_status}\n\n"
+
+            "🧊 FREEZE AUTHORITY\n"
+            f"{freeze_status}\n\n"
+
+            "🪙 SUPPLY\n"
+            f"{supply}\n\n"
+
+            "🔢 DECIMAIS\n"
+            f"{decimals}\n\n"
+
+            "⚙️ TOKEN PROGRAM\n"
+            f"`{owner_program}`\n\n"
+
+            "📊 PRÓXIMA ANÁLISE\n"
+            "• Concentração dos holders\n"
+            "• Liquidez\n"
+            "• Carteira do dev\n"
+            "• Histórico on-chain\n"
+            "• Risco de rug pull\n\n"
+
+            "⚠️ Ainda não é um Security Score."
+        )
+
+        await update.message.reply_text(
+            message,
+            parse_mode="Markdown"
+        )
+
+    except Exception as error:
+
+        print(
+            "ERRO SECURITY:",
+            error
+        )
+
+        await update.message.reply_text(
+            "❌ Não consegui consultar esse token.\n\n"
+            "Verifique o endereço e tente novamente."
+        )
 async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -452,6 +617,7 @@ async def help_command(
         "/start — Iniciar\n"
         "/top — Oportunidades\n"
         "/analyze — Analisar token\n"
+        "/security — Segurança do token\n"
         "/status — Status\n"
         "/help — Ajuda"
     )
@@ -476,7 +642,9 @@ def main():
     app.add_handler(
         CommandHandler("analyze", analyze)
     )
-
+app.add_handler(
+    CommandHandler("security", security)
+)
     app.add_handler(
         CommandHandler("help", help_command)
     )

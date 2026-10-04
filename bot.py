@@ -32,7 +32,84 @@ def solana_rpc(method, params):
         raise Exception(data["error"])
 
     return data.get("result")
+def get_liquidity_data(token_address):
+    url = f"https://api.dexscreener.com/token-pairs/v1/solana/{token_address}"
 
+    response = requests.get(url, timeout=15)
+    response.raise_for_status()
+
+    data = response.json()
+
+    if not data:
+        return None
+
+    if isinstance(data, list):
+        pairs = data
+    else:
+        pairs = data.get("pairs", [])
+
+    if not pairs:
+        return None
+
+    valid_pairs = []
+
+    for pair in pairs:
+        liquidity = pair.get("liquidity", {}).get("usd")
+
+        if liquidity is not None:
+            valid_pairs.append(pair)
+
+    if not valid_pairs:
+        return None
+
+    best_pair = max(
+        valid_pairs,
+        key=lambda pair: float(
+            pair.get("liquidity", {}).get("usd", 0) or 0
+        )
+    )
+
+    liquidity = float(
+        best_pair.get("liquidity", {}).get("usd", 0) or 0
+    )
+
+    market_cap = float(
+        best_pair.get("marketCap")
+        or best_pair.get("fdv")
+        or 0
+    )
+
+    volume_24h = float(
+        best_pair.get("volume", {}).get("h24", 0) or 0
+    )
+
+    price_change_24h = float(
+        best_pair.get("priceChange", {}).get("h24", 0) or 0
+    )
+
+    dex = best_pair.get("dexId", "N/A")
+
+    pair_address = best_pair.get(
+        "pairAddress",
+        "N/A"
+    )
+
+    if market_cap > 0:
+        liquidity_ratio = (
+            liquidity / market_cap
+        ) * 100
+    else:
+        liquidity_ratio = 0
+
+    return {
+        "liquidity": liquidity,
+        "market_cap": market_cap,
+        "volume_24h": volume_24h,
+        "price_change_24h": price_change_24h,
+        "liquidity_ratio": liquidity_ratio,
+        "dex": dex,
+        "pair_address": pair_address
+    }
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 MEME RADAR AI\n\n"

@@ -32,11 +32,160 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
-        "🔎 O scanner de oportunidades será ativado nas próximas etapas.\n\n"
-        "Por enquanto, use:\n"
-        "/analyze ENDERECO_DO_TOKEN"
+        "🔎 Procurando oportunidades na Solana...\n"
+        "⏳ Analisando mercado..."
     )
+
+    try:
+
+        url = "https://api.dexscreener.com/latest/dex/search?q=SOL"
+
+        response = requests.get(
+            url,
+            timeout=15
+        )
+
+        if response.status_code != 200:
+            await update.message.reply_text(
+                "❌ Não consegui consultar o mercado agora."
+            )
+            return
+
+        data = response.json()
+
+        pairs = data.get("pairs", [])
+
+        solana_pairs = [
+            pair for pair in pairs
+            if pair.get("chainId") == "solana"
+        ]
+
+        candidatos = []
+
+        for pair in solana_pairs:
+
+            liquidity = (
+                pair.get("liquidity", {}).get("usd", 0) or 0
+            )
+
+            volume = (
+                pair.get("volume", {}).get("h24", 0) or 0
+            )
+
+            price_change = (
+                pair.get("priceChange", {}).get("h24", 0) or 0
+            )
+
+            if liquidity < 10000:
+                continue
+
+            if volume < 5000:
+                continue
+
+            score = 0
+
+            if liquidity >= 50000:
+                score += 30
+            elif liquidity >= 25000:
+                score += 20
+            else:
+                score += 10
+
+            if volume >= 100000:
+                score += 30
+            elif volume >= 50000:
+                score += 20
+            else:
+                score += 10
+
+            if price_change > 20:
+                score += 20
+            elif price_change > 5:
+                score += 15
+            elif price_change > 0:
+                score += 10
+
+            if volume > liquidity:
+                score += 20
+
+            base_token = pair.get("baseToken", {})
+
+            name = base_token.get(
+                "name",
+                "Desconhecido"
+            )
+
+            symbol = base_token.get(
+                "symbol",
+                "???"
+            )
+
+            address = base_token.get(
+                "address",
+                ""
+            )
+
+            candidatos.append({
+                "name": name,
+                "symbol": symbol,
+                "address": address,
+                "liquidity": liquidity,
+                "volume": volume,
+                "price_change": price_change,
+                "score": score
+            })
+
+        candidatos.sort(
+            key=lambda x: x["score"],
+            reverse=True
+        )
+
+        candidatos = candidatos[:5]
+
+        if not candidatos:
+            await update.message.reply_text(
+                "⚠️ Não encontrei oportunidades suficientes "
+                "com os filtros atuais."
+            )
+            return
+
+        message = "🏆 TOP OPORTUNIDADES — SOLANA\n\n"
+
+        for i, token in enumerate(candidatos, 1):
+
+            message += (
+                f"{i}️⃣ {token['name']} "
+                f"({token['symbol']})\n"
+                f"🎯 Score: {token['score']}/100\n"
+                f"💧 Liquidez: "
+                f"${token['liquidity']:,.0f}\n"
+                f"📊 Volume 24h: "
+                f"${token['volume']:,.0f}\n"
+                f"📈 Movimento 24h: "
+                f"{token['price_change']}%\n"
+                f"🔗 {token['address']}\n\n"
+            )
+
+        message += (
+            "⚠️ ATENÇÃO\n"
+            "Esse ranking considera apenas dados de mercado.\n"
+            "Ainda NÃO verifica segurança do contrato, "
+            "carteiras ou risco de rug pull.\n\n"
+            "Não é recomendação de compra."
+        )
+
+        await update.message.reply_text(message)
+
+    except Exception as error:
+
+        print("ERRO TOP:", error)
+
+        await update.message.reply_text(
+            "❌ Erro ao analisar o mercado.\n"
+            "Verifique os logs do Railway."
+        )
 
 
 async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -22,6 +22,7 @@ SOLANA_RPC = os.environ["SOLANA_RPC"]
 # =========================================================
 
 def solana_rpc(method, params):
+
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -65,7 +66,10 @@ def get_liquidity_data(token_address):
 
     data = response.json()
 
-    pairs = data.get("pairs", [])
+    pairs = data.get(
+        "pairs",
+        []
+    )
 
     solana_pairs = [
         pair
@@ -76,11 +80,14 @@ def get_liquidity_data(token_address):
     if not solana_pairs:
         return None
 
-    # Escolhe o par com maior liquidez
+    # Escolher o par com maior liquidez
     best_pair = max(
         solana_pairs,
         key=lambda pair: (
-            pair.get("liquidity", {}).get("usd") or 0
+            pair.get(
+                "liquidity",
+                {}
+            ).get("usd") or 0
         )
     )
 
@@ -129,20 +136,16 @@ def get_liquidity_data(token_address):
 
 
 # =========================================================
-# TOKEN ACCOUNTS DE UMA CARTEIRA
+# IDENTIFICAR OWNER DE UMA TOKEN ACCOUNT
 # =========================================================
 
-def get_token_accounts_owned_by(
-    owner_address,
-    token_address
-):
+def get_token_account_owner(token_account_address):
 
     result = solana_rpc(
-        "getTokenAccountsByOwner",
+        "getAccountInfo",
         [
-            owner_address,
+            token_account_address,
             {
-                "mint": token_address,
                 "encoding": "jsonParsed",
                 "commitment": "confirmed"
             }
@@ -150,18 +153,35 @@ def get_token_accounts_owned_by(
     )
 
     if not result:
-        return []
+        return None
 
-    accounts = result.get(
-        "value",
-        []
+    account = result.get(
+        "value"
     )
 
-    return [
-        account.get("pubkey")
-        for account in accounts
-        if account.get("pubkey")
-    ]
+    if not account:
+        return None
+
+    data = account.get(
+        "data",
+        {}
+    )
+
+    parsed = data.get(
+        "parsed",
+        {}
+    )
+
+    info = parsed.get(
+        "info",
+        {}
+    )
+
+    owner = info.get(
+        "owner"
+    )
+
+    return owner
 
 
 # =========================================================
@@ -194,6 +214,7 @@ async def help_command(
 
     await update.message.reply_text(
         "🤖 MEME RADAR AI\n\n"
+
         "📊 /top\n"
         "Mostra os tokens com melhor atividade "
         "de mercado.\n\n"
@@ -245,7 +266,10 @@ async def top(
 
         for profile in profiles:
 
-            if profile.get("chainId") != "solana":
+            if profile.get(
+                "chainId"
+            ) != "solana":
+
                 continue
 
             token_address = profile.get(
@@ -270,7 +294,9 @@ async def top(
 
                 token_response.raise_for_status()
 
-                token_data = token_response.json()
+                token_data = (
+                    token_response.json()
+                )
 
                 pairs = token_data.get(
                     "pairs",
@@ -280,7 +306,9 @@ async def top(
                 solana_pairs = [
                     pair
                     for pair in pairs
-                    if pair.get("chainId") == "solana"
+                    if pair.get(
+                        "chainId"
+                    ) == "solana"
                 ]
 
                 if not solana_pairs:
@@ -316,6 +344,7 @@ async def top(
                     "SOL",
                     "WSOL"
                 ]:
+
                     continue
 
                 liquidity = (
@@ -337,8 +366,12 @@ async def top(
                 )
 
                 market_cap = (
-                    best_pair.get("marketCap")
-                    or best_pair.get("fdv")
+                    best_pair.get(
+                        "marketCap"
+                    )
+                    or best_pair.get(
+                        "fdv"
+                    )
                     or 0
                 )
 
@@ -363,17 +396,20 @@ async def top(
                     30
                 )
 
-                # Evita premiar demais movimentos parabólicos
+                # Evitar premiar demais movimentos parabólicos
                 if price_change >= 50:
+
                     movement_score = 5
 
                 elif price_change > 0:
+
                     movement_score = min(
                         price_change / 10,
                         20
                     )
 
                 else:
+
                     movement_score = 0
 
                 volume_liquidity_ratio = (
@@ -435,6 +471,7 @@ async def top(
 
         message = (
             "🔥 MEME RADAR AI — TOP 5\n\n"
+
             "Ranking baseado em dados de mercado.\n"
             "Ainda não considera segurança, "
             "carteiras, comunidade ou notícias.\n\n"
@@ -448,24 +485,33 @@ async def top(
             message += (
                 f"{index}️⃣ {token['name']} "
                 f"({token['symbol']})\n"
+
                 f"📊 Score mercado: "
                 f"{token['score']:.0f}/100\n"
+
                 f"💧 Liquidez: "
                 f"${token['liquidity']:,.0f}\n"
+
                 f"📈 Volume 24h: "
                 f"${token['volume']:,.0f}\n"
+
                 f"🚀 Movimento: "
                 f"{token['price_change']:.2f}%\n"
+
                 f"💰 MC: "
                 f"${token['market_cap']:,.0f}\n"
+
                 f"🪙 `{token['address']}`\n\n"
             )
 
         message += (
             "⚠️ IMPORTANTE\n"
+
             "Esse ranking NÃO é sinal de compra.\n"
+
             "Um token pode ter volume alto e ainda "
             "ser extremamente arriscado.\n\n"
+
             "Próxima etapa: Security + Wallet "
             "Intelligence."
         )
@@ -502,6 +548,7 @@ async def security(
         await update.message.reply_text(
             "🛡️ Você precisa colocar o endereço "
             "do token.\n\n"
+
             "Exemplo:\n"
             "/security ENDERECO_DO_TOKEN"
         )
@@ -636,7 +683,7 @@ async def security(
             )
 
         # =====================================================
-        # 5. CALCULAR CONCENTRAÇÃO
+        # 5. HOLDER INTELLIGENCE 2.0
         # =====================================================
 
         try:
@@ -651,9 +698,17 @@ async def security(
 
         top_10_percentage = 0
 
+        holder_wallets = {}
+
+        holder_details = []
+
         if supply_number > 0:
 
             for holder in largest_accounts[:10]:
+
+                token_account = holder.get(
+                    "address"
+                )
 
                 amount = int(
                     holder.get(
@@ -667,6 +722,89 @@ async def security(
                 ) * 100
 
                 top_10_percentage += percentage
+
+                owner = None
+
+                try:
+
+                    owner = (
+                        get_token_account_owner(
+                            token_account
+                        )
+                    )
+
+                except Exception as owner_error:
+
+                    print(
+                        "ERRO OWNER:",
+                        repr(owner_error)
+                    )
+
+                if owner:
+
+                    if owner not in holder_wallets:
+
+                        holder_wallets[owner] = 0
+
+                    holder_wallets[owner] += (
+                        percentage
+                    )
+
+                    holder_details.append({
+                        "token_account": (
+                            token_account
+                        ),
+                        "owner": owner,
+                        "percentage": percentage
+                    })
+
+                else:
+
+                    holder_details.append({
+                        "token_account": (
+                            token_account
+                        ),
+                        "owner": None,
+                        "percentage": percentage
+                    })
+
+        unique_wallets = len(
+            holder_wallets
+        )
+
+        # =====================================================
+        # 5.1 ORDENAR WALLETS
+        # =====================================================
+
+        sorted_wallets = sorted(
+            holder_wallets.items(),
+            key=lambda item: item[1],
+            reverse=True
+        )
+
+        top_wallets_message = ""
+
+        for index, wallet in enumerate(
+            sorted_wallets[:5],
+            start=1
+        ):
+
+            wallet_address = wallet[0]
+
+            wallet_percentage = wallet[1]
+
+            top_wallets_message += (
+                f"{index}. "
+                f"`{wallet_address}`\n"
+                f"   {wallet_percentage:.2f}%\n"
+            )
+
+        if not top_wallets_message:
+
+            top_wallets_message = (
+                "Não foi possível identificar "
+                "os owners das maiores contas."
+            )
 
         # =====================================================
         # 6. CLASSIFICAÇÃO
@@ -761,17 +899,24 @@ async def security(
 
             liquidity_message = (
                 "💧 LIQUIDEZ\n"
+
                 f"Liquidez: "
                 f"${liquidity:,.0f}\n"
+
                 f"Market Cap: "
                 f"${market_cap:,.0f}\n"
+
                 f"Volume 24h: "
                 f"${volume_24h:,.0f}\n"
+
                 f"Variação 24h: "
                 f"{price_change:.2f}%\n\n"
+
                 f"Liquidez: "
                 f"{liquidity_status}\n"
+
                 f"DEX: {dex_id}\n"
+
                 f"Pool: `{pair_address}`"
             )
 
@@ -801,16 +946,27 @@ async def security(
             f"`{owner_program}`\n\n"
 
             "👥 HOLDER INTELLIGENCE\n"
-            f"Contas analisadas: "
+
+            f"Token accounts analisadas: "
             f"{len(largest_accounts)}\n"
-            f"Top 10: "
+
+            f"Top 10 bruto: "
             f"{top_10_percentage:.2f}%\n"
+
+            f"Owners identificados: "
+            f"{unique_wallets}\n"
+
             f"Concentração: "
             f"{concentration_status}\n\n"
+
+            "👛 PRINCIPAIS WALLETS IDENTIFICADAS\n"
+
+            f"{top_wallets_message}\n"
 
             f"{liquidity_message}\n\n"
 
             "📊 PRÓXIMAS ANÁLISES\n"
+
             "• Carteira do dev\n"
             "• Histórico on-chain\n"
             "• Relação entre carteiras\n"

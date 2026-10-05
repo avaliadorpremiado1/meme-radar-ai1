@@ -264,7 +264,6 @@ def inspect_mint_initialization(transaction, token_address):
 
             info = parsed.get("info") or {}
 
-            # initializeMint / initializeMint2
             if instruction_type in (
                 "initializeMint",
                 "initializeMint2"
@@ -283,7 +282,6 @@ def inspect_mint_initialization(transaction, token_address):
                         "parsed": True
                     })
 
-            # CreateAccount relacionado ao mint
             if instruction_type == "createAccount":
 
                 new_account = info.get("newAccount")
@@ -398,10 +396,6 @@ def analyze_creation_transaction(
     mint_authority = False
     freeze_authority = False
 
-    # --------------------------------------------------------
-    # Verifica autoridades
-    # --------------------------------------------------------
-
     for instruction in extract_instructions(transaction):
 
         parsed = (
@@ -491,9 +485,6 @@ def identify_deployer_candidates(
         if not signature.get("err")
     ]
 
-    # getSignaturesForAddress retorna do mais recente
-    # para o mais antigo.
-    # Invertemos para analisar cronologicamente.
     successful.reverse()
 
     candidates = {}
@@ -528,8 +519,6 @@ def identify_deployer_candidates(
             or analysis["raw_token_instructions"]
         )
 
-        # Sem evidência de criação:
-        # não inventamos deployer.
         if not creation_evidence:
             continue
 
@@ -564,10 +553,6 @@ def identify_deployer_candidates(
                 )
             )
 
-            # ------------------------------------------------
-            # Fee payer
-            # ------------------------------------------------
-
             if wallet == analysis["fee_payer"]:
 
                 if not candidate["fee_payer"]:
@@ -580,10 +565,6 @@ def identify_deployer_candidates(
 
                     candidate["fee_payer"] = True
 
-            # ------------------------------------------------
-            # Signer
-            # ------------------------------------------------
-
             if wallet in analysis["signers"]:
 
                 if not candidate["signer"]:
@@ -595,10 +576,6 @@ def identify_deployer_candidates(
                     )
 
                     candidate["signer"] = True
-
-            # ------------------------------------------------
-            # Mint authority
-            # ------------------------------------------------
 
             if (
                 analysis["mint_authority"]
@@ -615,10 +592,6 @@ def identify_deployer_candidates(
 
                     candidate["mint_authority"] = True
 
-            # ------------------------------------------------
-            # Freeze authority
-            # ------------------------------------------------
-
             if (
                 analysis["freeze_authority"]
                 and wallet in analysis["signers"]
@@ -634,10 +607,6 @@ def identify_deployer_candidates(
 
                     candidate["freeze_authority"] = True
 
-            # ------------------------------------------------
-            # Initialize Mint
-            # ------------------------------------------------
-
             if analysis["mint_findings"]:
 
                 if not candidate["initialize_mint"]:
@@ -650,10 +619,6 @@ def identify_deployer_candidates(
 
                     candidate["initialize_mint"] = True
 
-            # ------------------------------------------------
-            # Create Account
-            # ------------------------------------------------
-
             if analysis["create_findings"]:
 
                 if not candidate["create_account"]:
@@ -665,10 +630,6 @@ def identify_deployer_candidates(
                     )
 
                     candidate["create_account"] = True
-
-    # --------------------------------------------------------
-    # Classificação final
-    # --------------------------------------------------------
 
     results = []
 
@@ -702,7 +663,7 @@ def identify_deployer_candidates(
 
 
 # ============================================================
-# HOLDER INTELLIGENCE
+# HOLDER INTELLIGENCE + POOL INTELLIGENCE
 # ============================================================
 
 def holder_intelligence(
@@ -735,15 +696,29 @@ def holder_intelligence(
 
     owners = {}
 
+    # Quantidade de tokens pertencentes à pool
+    pool_amount = 0
+
+    # Token accounts que foram identificadas
+    pool_accounts_found = []
+
     for account in accounts[:20]:
+
+        token_account_address = account.get(
+            "address"
+        )
 
         amount = float(
             account.get("amount") or 0
         )
 
         owner = get_token_account_owner(
-            account.get("address")
+            token_account_address
         )
+
+        # ----------------------------------------------------
+        # HOLDER REAL
+        # ----------------------------------------------------
 
         if owner:
 
@@ -751,6 +726,49 @@ def holder_intelligence(
                 owners.get(owner, 0)
                 + amount
             )
+
+        # ----------------------------------------------------
+        # POOL INTELLIGENCE CORRIGIDO
+        # ----------------------------------------------------
+        #
+        # Antes o bot fazia somente:
+        #
+        # token_account_address == pair_address
+        #
+        # Isso pode resultar em 0%.
+        #
+        # Agora verificamos:
+        #
+        # 1. endereço da token account
+        # 2. owner da token account
+        #
+        # Assim conseguimos identificar quando a pool
+        # controla uma token account específica.
+        # ----------------------------------------------------
+
+        if pair_address:
+
+            is_pool_account = (
+                token_account_address
+                == pair_address
+            )
+
+            is_pool_owner = (
+                owner == pair_address
+            )
+
+            if (
+                is_pool_account
+                or is_pool_owner
+            ):
+
+                pool_amount += amount
+
+                pool_accounts_found.append({
+                    "token_account": token_account_address,
+                    "owner": owner,
+                    "amount": amount
+                })
 
     top10_raw = sum(
         float(account.get("amount") or 0)
@@ -769,18 +787,6 @@ def holder_intelligence(
     )
 
     denominator = supply_raw or 1
-
-    pool_amount = 0
-
-    if pair_address:
-
-        for account in accounts:
-
-            if account.get("address") == pair_address:
-
-                pool_amount += float(
-                    account.get("amount") or 0
-                )
 
     return {
         "accounts_analyzed": len(
@@ -802,6 +808,8 @@ def holder_intelligence(
             / denominator
             * 100
         ),
+        "pool_amount": pool_amount,
+        "pool_accounts_found": pool_accounts_found,
         "top_owners": [
             (
                 wallet,
@@ -1081,8 +1089,7 @@ def analyze_possible_funders(
             if other_post < other_pre:
 
                 decrease = (
-                    other_pre
-                    - other_post
+                    other_pre - other_post
                 )
 
                 funders[other_wallet] = (
@@ -1503,7 +1510,7 @@ async def security(
         )
 
         # ----------------------------------------------------
-        # HOLDERS
+        # HOLDERS + POOL
         # ----------------------------------------------------
 
         holders = holder_intelligence(
@@ -1593,7 +1600,15 @@ async def security(
             f"{holders['owners_identified']}",
 
             f"Concentração real: "
-            f"{holders['real_concentration_pct']:.2f}%"
+            f"{holders['real_concentration_pct']:.2f}%",
+
+            f"\n💧 POOL IDENTIFICADA",
+
+            f"\nPool: "
+            f"{pair_address or 'N/D'}",
+
+            f"Tokens na pool: "
+            f"{holders['pool_pct']:.2f}%"
         ])
 
         # ----------------------------------------------------
@@ -1633,15 +1648,7 @@ async def security(
 
             text.extend([
 
-                "\n💧 POOL IDENTIFICADA",
-
-                f"\nPool: "
-                f"{pair_address or 'N/D'}",
-
-                f"Tokens na pool: "
-                f"{holders['pool_pct']:.2f}%",
-
-                f"\n💧 LIQUIDEZ",
+                "\n💧 LIQUIDEZ",
 
                 f"Liquidez: "
                 f"${liquidity:,.0f}",
@@ -1671,10 +1678,6 @@ async def security(
             f"{tx_count}"
         ])
 
-        # ----------------------------------------------------
-        # NO CANDIDATE
-        # ----------------------------------------------------
-
         if not candidates:
 
             text.extend([
@@ -1688,10 +1691,6 @@ async def security(
                 "existe deployer identificável; apenas "
                 "não houve evidência suficiente."
             ])
-
-        # ----------------------------------------------------
-        # CANDIDATES
-        # ----------------------------------------------------
 
         else:
 
@@ -1728,10 +1727,6 @@ async def security(
                     f"Tx: "
                     f"{candidate['first_signature'] or 'N/D'}"
                 ])
-
-        # ----------------------------------------------------
-        # FOOTER
-        # ----------------------------------------------------
 
         text.extend([
 

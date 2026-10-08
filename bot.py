@@ -11,6 +11,11 @@ TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022_PROGRAM_ID = "TokenzQdBNLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 SYSTEM_PROGRAM_ID = "11111111111111111111111111111111"
 
+# Endereço conhecido do Incinerator da Solana
+BURN_ADDRESSES = {
+    "1nc1nerator11111111111111111111111111111111"
+}
+
 
 # ============================================================
 # SOLANA RPC
@@ -111,6 +116,13 @@ def is_liquidity_pool_wallet(wallet_address, pair_address):
         return False
 
     return wallet_address == pair_address
+
+
+def is_burn_address(address):
+    if not address:
+        return False
+
+    return address in BURN_ADDRESSES
 
 
 # ============================================================
@@ -663,7 +675,7 @@ def identify_deployer_candidates(
 
 
 # ============================================================
-# HOLDER INTELLIGENCE + POOL INTELLIGENCE
+# HOLDER INTELLIGENCE 3.0
 # ============================================================
 
 def holder_intelligence(
@@ -696,11 +708,15 @@ def holder_intelligence(
 
     owners = {}
 
-    # Quantidade de tokens pertencentes à pool
     pool_amount = 0
+    burn_amount = 0
 
-    # Token accounts que foram identificadas
     pool_accounts_found = []
+    burn_accounts_found = []
+
+    # --------------------------------------------------------
+    # ANALISA TOP 20 TOKEN ACCOUNTS
+    # --------------------------------------------------------
 
     for account in accounts[:20]:
 
@@ -717,6 +733,76 @@ def holder_intelligence(
         )
 
         # ----------------------------------------------------
+        # IDENTIFICAÇÃO DA POOL
+        # ----------------------------------------------------
+
+        is_pool_account = (
+            pair_address
+            and token_account_address == pair_address
+        )
+
+        is_pool_owner = (
+            pair_address
+            and owner == pair_address
+        )
+
+        is_pool = (
+            is_pool_account
+            or is_pool_owner
+        )
+
+        # ----------------------------------------------------
+        # IDENTIFICAÇÃO DE BURN / DEAD
+        # ----------------------------------------------------
+
+        is_burn_account = (
+            is_burn_address(
+                token_account_address
+            )
+        )
+
+        is_burn_owner = (
+            is_burn_address(owner)
+        )
+
+        is_burn = (
+            is_burn_account
+            or is_burn_owner
+        )
+
+        # ----------------------------------------------------
+        # POOL
+        # ----------------------------------------------------
+
+        if is_pool:
+
+            pool_amount += amount
+
+            pool_accounts_found.append({
+                "token_account": token_account_address,
+                "owner": owner,
+                "amount": amount
+            })
+
+            continue
+
+        # ----------------------------------------------------
+        # BURN / DEAD
+        # ----------------------------------------------------
+
+        if is_burn:
+
+            burn_amount += amount
+
+            burn_accounts_found.append({
+                "token_account": token_account_address,
+                "owner": owner,
+                "amount": amount
+            })
+
+            continue
+
+        # ----------------------------------------------------
         # HOLDER REAL
         # ----------------------------------------------------
 
@@ -727,53 +813,18 @@ def holder_intelligence(
                 + amount
             )
 
-        # ----------------------------------------------------
-        # POOL INTELLIGENCE CORRIGIDO
-        # ----------------------------------------------------
-        #
-        # Antes o bot fazia somente:
-        #
-        # token_account_address == pair_address
-        #
-        # Isso pode resultar em 0%.
-        #
-        # Agora verificamos:
-        #
-        # 1. endereço da token account
-        # 2. owner da token account
-        #
-        # Assim conseguimos identificar quando a pool
-        # controla uma token account específica.
-        # ----------------------------------------------------
-
-        if pair_address:
-
-            is_pool_account = (
-                token_account_address
-                == pair_address
-            )
-
-            is_pool_owner = (
-                owner == pair_address
-            )
-
-            if (
-                is_pool_account
-                or is_pool_owner
-            ):
-
-                pool_amount += amount
-
-                pool_accounts_found.append({
-                    "token_account": token_account_address,
-                    "owner": owner,
-                    "amount": amount
-                })
+    # --------------------------------------------------------
+    # TOP 10 BRUTO
+    # --------------------------------------------------------
 
     top10_raw = sum(
         float(account.get("amount") or 0)
         for account in accounts[:10]
     )
+
+    # --------------------------------------------------------
+    # HOLDERS REAIS ORDENADOS
+    # --------------------------------------------------------
 
     real_top = sorted(
         owners.items(),
@@ -781,45 +832,143 @@ def holder_intelligence(
         reverse=True
     )
 
-    real_top10 = sum(
+    # --------------------------------------------------------
+    # TOP 10 REAL
+    # --------------------------------------------------------
+
+    real_top10_amount = sum(
         amount
         for _, amount in real_top[:10]
     )
 
+    # --------------------------------------------------------
+    # SUPPLY NÃO DESTINADO A POOL/BURN
+    # --------------------------------------------------------
+
+    adjusted_supply = max(
+        supply_raw
+        - pool_amount
+        - burn_amount,
+        0
+    )
+
+    # --------------------------------------------------------
+    # CONCENTRAÇÃO AJUSTADA
+    # --------------------------------------------------------
+
+    if adjusted_supply > 0:
+
+        adjusted_concentration = (
+            real_top10_amount
+            / adjusted_supply
+            * 100
+        )
+
+    else:
+
+        adjusted_concentration = 0
+
     denominator = supply_raw or 1
+
+    # --------------------------------------------------------
+    # PRINCIPAIS HOLDERS REAIS
+    # --------------------------------------------------------
+
+    top_real_holders = []
+
+    for wallet, amount in real_top[:5]:
+
+        top_real_holders.append({
+            "wallet": wallet,
+            "amount": amount,
+            "pct_supply": (
+                amount
+                / denominator
+                * 100
+            ),
+            "pct_adjusted": (
+                amount
+                / adjusted_supply
+                * 100
+                if adjusted_supply > 0
+                else 0
+            )
+        })
+
+    # --------------------------------------------------------
+    # CLASSIFICAÇÃO DE CONCENTRAÇÃO
+    # --------------------------------------------------------
+
+    if adjusted_concentration >= 70:
+
+        concentration_level = "🔴 MUITO ALTA"
+
+    elif adjusted_concentration >= 50:
+
+        concentration_level = "🟠 ALTA"
+
+    elif adjusted_concentration >= 30:
+
+        concentration_level = "🟡 MODERADA"
+
+    else:
+
+        concentration_level = "🟢 BAIXA"
 
     return {
         "accounts_analyzed": len(
             accounts[:20]
         ),
+
         "top10_raw_pct": (
             top10_raw
             / denominator
             * 100
         ),
-        "real_concentration_pct": (
-            real_top10
-            / denominator
-            * 100
+
+        "owners_identified": len(
+            owners
         ),
-        "owners_identified": len(owners),
+
         "pool_pct": (
             pool_amount
             / denominator
             * 100
         ),
+
         "pool_amount": pool_amount,
-        "pool_accounts_found": pool_accounts_found,
-        "top_owners": [
-            (
-                wallet,
-                amount
-                / denominator
-                * 100
-            )
-            for wallet, amount
-            in real_top[:5]
-        ]
+
+        "burn_pct": (
+            burn_amount
+            / denominator
+            * 100
+        ),
+
+        "burn_amount": burn_amount,
+
+        "adjusted_supply": adjusted_supply,
+
+        "real_top10_amount": real_top10_amount,
+
+        "adjusted_concentration_pct": (
+            adjusted_concentration
+        ),
+
+        "concentration_level": (
+            concentration_level
+        ),
+
+        "pool_accounts_found": (
+            pool_accounts_found
+        ),
+
+        "burn_accounts_found": (
+            burn_accounts_found
+        ),
+
+        "top_real_holders": (
+            top_real_holders
+        )
     }
 
 
@@ -1588,7 +1737,7 @@ async def security(
             f"\n⚙️ TOKEN PROGRAM\n"
             f"{security_data['program']}",
 
-            "\n👥 HOLDER INTELLIGENCE",
+            "\n👥 HOLDER INTELLIGENCE 3.0",
 
             f"\nToken accounts analisadas: "
             f"{holders['accounts_analyzed']}",
@@ -1596,24 +1745,73 @@ async def security(
             f"Top 10 bruto: "
             f"{holders['top10_raw_pct']:.2f}%",
 
-            f"Owners reais identificados: "
+            f"Holders reais identificados: "
             f"{holders['owners_identified']}",
 
-            f"Concentração real: "
-            f"{holders['real_concentration_pct']:.2f}%",
+            f"\n💧 Pool: "
+            f"{holders['pool_pct']:.2f}%",
 
-            f"\n💧 POOL IDENTIFICADA",
+            f"🔥 Burn/Dead: "
+            f"{holders['burn_pct']:.2f}%",
 
-            f"\nPool: "
-            f"{pair_address or 'N/D'}",
+            f"\n📊 SUPPLY AJUSTADO",
 
-            f"Tokens na pool: "
-            f"{holders['pool_pct']:.2f}%"
+            f"Disponível fora de pool/burn: "
+            f"{holders['adjusted_supply']:.0f}",
+
+            f"\n👥 CONCENTRAÇÃO REAL AJUSTADA",
+
+            f"Top 10 holders reais: "
+            f"{holders['adjusted_concentration_pct']:.2f}%",
+
+            f"Nível: "
+            f"{holders['concentration_level']}"
         ])
+
+        # ----------------------------------------------------
+        # TOP HOLDERS REAIS
+        # ----------------------------------------------------
+
+        if holders["top_real_holders"]:
+
+            text.append(
+                "\n👤 PRINCIPAIS HOLDERS REAIS"
+            )
+
+            for index, holder in enumerate(
+                holders["top_real_holders"],
+                1
+            ):
+
+                wallet = holder["wallet"]
+
+                short_wallet = (
+                    wallet[:6]
+                    + "..."
+                    + wallet[-6:]
+                )
+
+                text.extend([
+
+                    f"\n{index}. {short_wallet}",
+
+                    f"Supply total: "
+                    f"{holder['pct_supply']:.2f}%",
+
+                    f"Supply ajustado: "
+                    f"{holder['pct_adjusted']:.2f}%"
+                ])
 
         # ----------------------------------------------------
         # POOL DATA
         # ----------------------------------------------------
+
+        text.extend([
+            "\n💧 POOL IDENTIFICADA",
+
+            f"\nPool: "
+            f"{pair_address or 'N/D'}"
+        ])
 
         if pair:
 
@@ -1648,6 +1846,9 @@ async def security(
 
             text.extend([
 
+                f"Tokens na pool: "
+                f"{holders['pool_pct']:.2f}%",
+
                 "\n💧 LIQUIDEZ",
 
                 f"Liquidez: "
@@ -1665,6 +1866,12 @@ async def security(
                 f"DEX: "
                 f"{pair.get('dexId', 'N/D')}"
             ])
+
+        else:
+
+            text.append(
+                "Tokens na pool: N/D"
+            )
 
         # ----------------------------------------------------
         # DEV WALLET
